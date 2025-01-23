@@ -1,0 +1,177 @@
+import os
+import win32com.client as win32
+from tkinter import Tk, filedialog, Frame, Label, Entry, Button, Text, Scrollbar
+
+def replace_text_in_excel():
+    # 使用 tkinter 弹出文件夹选择对话框
+    root = Tk()
+    root.title("替换Excel 文件内文字   zzh")  # 设置窗口标题
+    root.geometry("800x600")  # 设置窗口大小
+
+    # 创建一个框架，包含输入框和按钮
+    frame = Frame(root)
+    frame.pack(padx=10, pady=10)
+
+    # 显示提示信息
+    label1 = Label(frame, text="请选择包含 Excel 文件的文件夹：")
+    label1.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+    def select_folder():
+        folder_path = filedialog.askdirectory(title="请选择包含 Excel 文件的文件夹")
+        folder_entry.delete(0, "end")
+        folder_entry.insert(0, folder_path)
+
+    # 目录选择按钮
+    folder_button = Button(frame, text="选择目录", command=select_folder)
+    folder_button.grid(row=0, column=1, padx=5, pady=5)
+
+    folder_entry = Entry(frame, width=50)
+    folder_entry.grid(row=0, column=2, padx=5, pady=5)
+
+    # 输入框，用于输入要替换的文本和新的文本
+    label2 = Label(frame, text="请输入要替换的原文本：")
+    label2.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+    old_text_entry = Entry(frame, width=50)
+    old_text_entry.grid(row=1, column=2, padx=5, pady=5)
+
+    label3 = Label(frame, text="请输入新的文本：")
+    label3.grid(row=2, column=0, padx=5, pady=5, sticky="w")
+    new_text_entry = Entry(frame, width=50)
+    new_text_entry.grid(row=2, column=2, padx=5, pady=5)
+
+    def start_replacement():
+        folder_path = folder_entry.get()
+        old_text = old_text_entry.get()
+        new_text = new_text_entry.get()
+
+        if not folder_path:
+            log("未选择目录，退出程序。")
+            return
+        if not old_text or not new_text:
+            log("未输入文本，退出程序。")
+            return
+
+        modified_files = []
+        unmodified_files = []
+
+        # 初始化 Excel 应用
+        excel = win32.Dispatch('Excel.Application')
+        excel.Visible = False  # 不显示 Excel 窗口
+
+        # 获取文件列表
+        files = []
+        for root_dir, dirs, filenames in os.walk(folder_path):
+            for filename in filenames:
+                if filename.endswith(".xls"):
+                    files.append(os.path.join(root_dir, filename))
+
+        # 遍历文件夹中的所有 Excel 文件并处理
+        for idx, file_path in enumerate(files):
+            log(f"正在处理文件：{file_path}")
+
+            try:
+                # 打开 Excel 文件
+                workbook = excel.Workbooks.Open(file_path)
+                file_modified = False
+
+                # 遍历所有工作表
+                for sheet in workbook.Sheets:
+                    if sheet.Visible == False:  # 跳过隐藏的工作表
+                        continue
+
+                    log(f"  正在处理工作表：{sheet.Name}")
+
+                    # 替换页眉和页脚内容
+                    headers = [
+                        sheet.PageSetup.LeftHeader,
+                        sheet.PageSetup.CenterHeader,
+                        sheet.PageSetup.RightHeader
+                    ]
+                    footers = [
+                        sheet.PageSetup.LeftFooter,
+                        sheet.PageSetup.CenterFooter,
+                        sheet.PageSetup.RightFooter
+                    ]
+
+                    for i, header in enumerate(headers):
+                        if old_text in header:
+                            headers[i] = header.replace(old_text, new_text)
+                            file_modified = True
+
+                    for i, footer in enumerate(footers):
+                        if old_text in footer:
+                            footers[i] = footer.replace(old_text, new_text)
+                            file_modified = True
+
+                    # 更新页眉和页脚
+                    sheet.PageSetup.LeftHeader = headers[0]
+                    sheet.PageSetup.CenterHeader = headers[1]
+                    sheet.PageSetup.RightHeader = headers[2]
+                    sheet.PageSetup.LeftFooter = footers[0]
+                    sheet.PageSetup.CenterFooter = footers[1]
+                    sheet.PageSetup.RightFooter = footers[2]
+
+                    # 替换单元格内容
+                    used_range = sheet.UsedRange
+                    for cell in used_range:
+                        if cell.Value and isinstance(cell.Value, str):
+                            if old_text in cell.Value:
+                                old_value = cell.Value
+                                cell.Value = cell.Value.replace(old_text, new_text)
+                                log(f"    修改单元格：原值='{old_value}' -> 新值='{cell.Value}'")
+                                file_modified = True
+
+                if file_modified:
+                    # 保存修改后的文件
+                    workbook.Save()
+                    log(f"已保存修改：{file_path}")
+                    modified_files.append(file_path)
+                else:
+                    unmodified_files.append(file_path)
+
+                # 关闭文件
+                workbook.Close(SaveChanges=True)
+            except Exception as e:
+                log(f"无法处理文件 {file_path}，错误：{e}")
+                continue
+
+        # 退出 Excel 应用
+        excel.Quit()
+
+        # 打印最终结果
+        log("\n处理完成！")
+        log("以下文件已被修改：")
+        for file in modified_files:
+            log(f"  {file}")
+
+        log("\n以下文件未被修改：")
+        for file in unmodified_files:
+            log(f"  {file}")
+
+    # 提交按钮
+    submit_button = Button(root, text="开始替换", command=start_replacement)
+    submit_button.pack(pady=10)
+
+    # 创建日志框
+    log_frame = Frame(root)
+    log_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    log_text = Text(log_frame, wrap="word", width=90, height=15, state="disabled")
+    log_text.pack(side="left", fill="both", expand=True)
+
+    scroll_bar = Scrollbar(log_frame, command=log_text.yview)
+    scroll_bar.pack(side="right", fill="y")
+    log_text.config(yscrollcommand=scroll_bar.set)
+
+    def log(message):
+        log_text.config(state="normal")  # 允许修改文本框内容
+        log_text.insert("end", message + "\n")
+        log_text.yview("end")  # 自动滚动到文本框底部
+        log_text.config(state="disabled")  # 禁止修改文本框内容
+        root.update_idletasks()  # 更新 GUI
+
+    # 保持窗口开启，直到用户手动关闭
+    root.mainloop()
+
+if __name__ == "__main__":
+    replace_text_in_excel()
