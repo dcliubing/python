@@ -1,0 +1,68 @@
+import tkinter as tk
+from tkinter import messagebox
+
+# 计算函数
+def calculate():
+    try:
+        flow = float(flow_entry.get())  # 流量
+        pressure = float(pressure_entry.get())  # 压力
+        temperature = float(temperature_entry.get())  # 温度
+
+        standard_pressure = 0.101325  # 标况压力，单位 MPa
+        standard_temperature = 273.15  # 标况温度，单位 K (0°C)
+
+        if mode_var.get() == "toStandard":  # 从工况到标况
+            # 按照公式 Q标 = Q工 × (P工 × T标) / (P标 × (T工 + 273.15))
+            result = flow * (pressure * standard_temperature) / (standard_pressure * (temperature + 273.15))
+            result = round(result, 2)  # 保留两位小数
+            result_label.config(text=f"标况流量: {result} Nm³/h")  # 修改单位为 Nm³/h
+        elif mode_var.get() == "toWorking":  # 从标况到工况
+            # 按照公式 Q工 = Q标 × (P标 × (T工 + 273.15)) / (P工 × T标)
+            result = flow * (standard_pressure * (temperature + 273.15)) / (pressure * standard_temperature)
+            result = round(result, 2)  # 保留两位小数
+            result_label.config(text=f"工况流量: {result} m³/h")  # 修改单位为 m³/h
+    except ValueError:
+        messagebox.showerror("输入错误", "请输入有效的数字！")
+
+# 更新流量单位标签
+def update_flow_label():
+    if mode_var.get() == "toStandard":
+        flow_label.config(text="流量 (m³/h):")  # 工况到标况时，单位为 m³/h
+    else:
+        flow_label.config(text="流量 (Nm³/h):")  # 标况到工况时，单位为 Nm³/h
+
+# 创建窗口
+root = tk.Tk()
+root.title("工况标况转换")
+root.geometry("500x480")  # 增加窗口高度，设置为 500x480
+
+# 标签和输入框
+flow_label = tk.Label(root, text="流量 (m³/h):")
+flow_label.pack(pady=10)
+flow_entry = tk.Entry(root)
+flow_entry.pack(pady=5)
+
+tk.Label(root, text="压力 (MPa):").pack(pady=10)
+pressure_entry = tk.Entry(root)
+pressure_entry.pack(pady=5)
+
+tk.Label(root, text="温度 (°C):").pack(pady=10)
+temperature_entry = tk.Entry(root)
+temperature_entry.pack(pady=5)
+
+# 转换模式选择
+mode_var = tk.StringVar(value="toStandard")
+tk.Label(root, text="转换模式:").pack(pady=10)
+tk.Radiobutton(root, text="从工况到标况", variable=mode_var, value="toStandard", command=update_flow_label).pack(pady=5)
+tk.Radiobutton(root, text="从标况到工况", variable=mode_var, value="toWorking", command=update_flow_label).pack(pady=5)
+
+# 计算按钮
+calculate_button = tk.Button(root, text="计算", command=calculate)
+calculate_button.pack(pady=20)
+
+# 结果显示区域
+result_label = tk.Label(root, text="结果将显示在这里", font=("Arial", 14))  # 增大字体
+result_label.pack(pady=15)
+
+# 启动 GUI
+root.mainloop()
