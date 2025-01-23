@@ -1,0 +1,61 @@
+import tkinter as tk
+from tkinter import messagebox
+
+def calculate_plate_count():
+    try:
+        # 获取用户输入的压力值（单位 MPa）
+        pressure_before = float(entry_pressure_before.get())  # 限流前压力
+        pressure_after = float(entry_pressure_after.get())    # 限流后压力
+        
+        # 检查输入是否合法
+        if pressure_before <= pressure_after:
+            messagebox.showerror("输入错误", "限流前压力必须大于限流后压力！")
+            return
+
+        # 初始化变量
+        current_pressure = pressure_before
+        plate_count = 0
+        
+        # 每个孔板压降为当前压力的44%
+        while current_pressure > pressure_after:
+            pressure_drop = current_pressure * 0.45  # 计算当前孔板的压降
+            current_pressure -= pressure_drop        # 更新当前压力
+            plate_count += 1                         # 记录孔板数量
+
+            # 避免压力减至负值
+            if current_pressure < 0:
+                current_pressure = 0
+                break
+        
+        # 显示结果
+        result_label.config(text=f"所需孔板数量：{plate_count} 块\n最终压力：{current_pressure:.4f} MPa")
+        
+    except ValueError:
+        messagebox.showerror("输入错误", "请输入有效的数字！")
+
+# 创建主窗口
+root = tk.Tk()
+root.title("限流孔板计算程序")
+
+# 输入限流前压力
+label_pressure_before = tk.Label(root, text="限流前压力 (MPa)：")
+label_pressure_before.grid(row=0, column=0, padx=10, pady=10)
+entry_pressure_before = tk.Entry(root)
+entry_pressure_before.grid(row=0, column=1, padx=10, pady=10)
+
+# 输入限流后压力
+label_pressure_after = tk.Label(root, text="限流后压力 (MPa)：")
+label_pressure_after.grid(row=1, column=0, padx=10, pady=10)
+entry_pressure_after = tk.Entry(root)
+entry_pressure_after.grid(row=1, column=1, padx=10, pady=10)
+
+# 计算按钮
+calculate_button = tk.Button(root, text="计算孔板数量", command=calculate_plate_count)
+calculate_button.grid(row=2, column=0, columnspan=2, pady=10)
+
+# 结果显示标签
+result_label = tk.Label(root, text="")
+result_label.grid(row=3, column=0, columnspan=2, pady=10)
+
+# 运行主循环
+root.mainloop()
