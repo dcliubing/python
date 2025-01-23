@@ -1,0 +1,121 @@
+import tkinter as tk
+
+def calculate_average_density(rho_liquid, V_liquid_h, molar_mass_gas, V_gas_standard_h, P_gauge, T_actual_C, P_atm=101.325):
+    # 将表压转换为绝压，单位为 kPa
+    P_actual = P_gauge + P_atm  # 绝对压力，单位：kPa
+    
+    # 将液体和气体的体积流量从 m³/h 转换为 m³/s
+    V_liquid = V_liquid_h / 3600  # m³/s
+    V_gas_standard = V_gas_standard_h / 3600  # m³/s
+
+    # 将摄氏度转换为开尔文
+    T_actual = T_actual_C + 273.15
+
+    # 标况下的压力和温度
+    P_standard = 101.325  # 标况压力 101.325 kPa
+    T_standard = 273.15   # 标况温度 273.15 K
+
+    # 根据实际压力和温度校正气体的体积流量
+    V_gas_actual = V_gas_standard * (P_standard / P_actual) * (T_actual / T_standard)
+
+    # 气体的密度计算公式: rho = (P * M) / (R * T)
+    # 转换气体常数R的单位为 kPa·m³/(mol·K)
+    R = 8.314  # J/(mol·K)，气体常数
+    molar_mass_kg_per_mol = molar_mass_gas / 1000  # 转换为 kg/mol
+    P_actual_Pa = P_actual * 1000  # 将压力转换为 Pa
+    rho_gas = (P_actual_Pa * molar_mass_kg_per_mol) / (R * T_actual)  # 气体工况下的密度
+
+    # 计算标况下的气体密度
+    T_standard_K = T_standard  # 标况下温度 273.15 K
+    P_standard_Pa = P_standard * 1000  # 标况下压力 101.325 kPa 转换为 Pa
+    rho_gas_standard = (P_standard_Pa * molar_mass_kg_per_mol) / (R * T_standard_K)  # 标况下气体密度
+
+    # 计算气体工况下的质量流量
+    mass_flow_gas = rho_gas * V_gas_actual * 3600  # m³/s 转换为 m³/h
+
+    # 计算两项流的平均密度
+    total_mass_flow = (rho_liquid * V_liquid_h) + mass_flow_gas
+    total_volume_flow = V_liquid_h + V_gas_actual * 3600  # m³/h
+    rho_avg = total_mass_flow / total_volume_flow
+
+    return rho_avg, rho_gas, mass_flow_gas, rho_gas_standard
+
+def update_results():
+    # 获取用户输入
+    try:
+        rho_liquid = float(entry_rho_liquid.get())
+        V_liquid_h = float(entry_V_liquid_h.get())
+        molar_mass_gas = float(entry_molar_mass_gas.get())
+        V_gas_standard_h = float(entry_V_gas_standard_h.get())
+        P_gauge = float(entry_P_gauge.get())
+        T_actual_C = float(entry_T_actual_C.get())
+        
+        # 调用计算函数
+        rho_avg, rho_gas, mass_flow_gas, rho_gas_standard = calculate_average_density(rho_liquid, V_liquid_h, molar_mass_gas, V_gas_standard_h, P_gauge, T_actual_C)
+        
+        # 更新显示结果
+        result_rho_avg.config(text=f"两项流平均密度：{rho_avg:.2f} kg/m³")
+        result_rho_gas.config(text=f"气体在工况下的密度：{rho_gas:.4f} kg/m³")
+        result_mass_flow_gas.config(text=f"气体在工况下的质量流量：{mass_flow_gas:.2f} kg/h")
+        result_rho_gas_standard.config(text=f"气体标况下的密度：{rho_gas_standard:.4f} kg/m³")
+    except ValueError:
+        # 如果用户输入无效数字，显示错误消息
+        result_rho_avg.config(text="请输入有效的数字！")
+        result_rho_gas.config(text="")
+        result_mass_flow_gas.config(text="")
+        result_rho_gas_standard.config(text="")
+
+# 创建窗口
+window = tk.Tk()
+window.title("两相流体密度计算    zzh")
+
+# 设置输入框标签
+label_rho_liquid = tk.Label(window, text="液体的密度 (kg/m³)：")
+label_rho_liquid.grid(row=0, column=0, padx=10, pady=5)
+entry_rho_liquid = tk.Entry(window)
+entry_rho_liquid.grid(row=0, column=1, padx=10, pady=5)
+
+label_V_liquid_h = tk.Label(window, text="液体的工况体积流量 (m³/h)：")
+label_V_liquid_h.grid(row=1, column=0, padx=10, pady=5)
+entry_V_liquid_h = tk.Entry(window)
+entry_V_liquid_h.grid(row=1, column=1, padx=10, pady=5)
+
+label_molar_mass_gas = tk.Label(window, text="气体的分子量 (g/mol)：")
+label_molar_mass_gas.grid(row=2, column=0, padx=10, pady=5)
+entry_molar_mass_gas = tk.Entry(window)
+entry_molar_mass_gas.grid(row=2, column=1, padx=10, pady=5)
+
+label_V_gas_standard_h = tk.Label(window, text="气体的标况体积流量 (Sm³/h)：")
+label_V_gas_standard_h.grid(row=3, column=0, padx=10, pady=5)
+entry_V_gas_standard_h = tk.Entry(window)
+entry_V_gas_standard_h.grid(row=3, column=1, padx=10, pady=5)
+
+label_P_gauge = tk.Label(window, text="气体的表压 (kPa)：")
+label_P_gauge.grid(row=4, column=0, padx=10, pady=5)
+entry_P_gauge = tk.Entry(window)
+entry_P_gauge.grid(row=4, column=1, padx=10, pady=5)
+
+label_T_actual_C = tk.Label(window, text="气体的实际温度 (°C)：")
+label_T_actual_C.grid(row=5, column=0, padx=10, pady=5)
+entry_T_actual_C = tk.Entry(window)
+entry_T_actual_C.grid(row=5, column=1, padx=10, pady=5)
+
+# 计算按钮
+calc_button = tk.Button(window, text="计算", command=update_results)
+calc_button.grid(row=6, column=0, columnspan=2, pady=10)
+
+# 结果显示
+result_rho_avg = tk.Label(window, text="两项流平均密度：")
+result_rho_avg.grid(row=7, column=0, columnspan=2, pady=5)
+
+result_rho_gas = tk.Label(window, text="气体在工况下的密度：")
+result_rho_gas.grid(row=8, column=0, columnspan=2, pady=5)
+
+result_mass_flow_gas = tk.Label(window, text="气体的质量流量：")
+result_mass_flow_gas.grid(row=9, column=0, columnspan=2, pady=5)
+
+result_rho_gas_standard = tk.Label(window, text="气体标况下的密度：")
+result_rho_gas_standard.grid(row=10, column=0, columnspan=2, pady=5)
+
+# 启动GUI
+window.mainloop()
