@@ -2,27 +2,24 @@ import os
 import threading
 import gc
 import tkinter as tk
-from tkinter import filedialog, scrolledtext
+from tkinter import filedialog, scrolledtext, messagebox
 import win32com.client as win32
+from tkinter import ttk
 
 def log(message):
-    """在日志窗口显示消息"""
     log_text.insert(tk.END, message + "\n")
     log_text.yview(tk.END)
 
 def select_folder():
-    """选择 Excel 文件所在的文件夹"""
     folder_selected = filedialog.askdirectory()
     if folder_selected:
         folder_entry.delete(0, tk.END)
         folder_entry.insert(0, folder_selected)
 
 def start_replacement():
-    """使用多线程启动 Excel 替换任务，防止 GUI 卡死"""
     threading.Thread(target=replace_excel_text, daemon=True).start()
 
 def replace_excel_text():
-    """遍历 Excel 文件并替换文本"""
     folder_path = folder_entry.get()
     old_text = old_text_entry.get()
     new_text = new_text_entry.get()
@@ -35,96 +32,156 @@ def replace_excel_text():
         return
 
     log("✅ 开始处理 Excel 文件...")
-    
-    try:
-        # 启动 Excel
-        excel = win32.Dispatch('Excel.Application')
-        excel.ScreenUpdating = False  # 禁用屏幕刷新，加快速度
-        excel.DisplayAlerts = False  # 禁用警告弹窗
+    excel = None  # 声明在外部以便finally访问
 
-        # 查找所有 Excel 文件
-        files = [os.path.join(root, f) for root, _, filenames in os.walk(folder_path) for f in filenames if f.endswith((".xls", ".xlsx"))]
+    try:
+        # 创建全新的独立Excel进程（关键修改）
+        excel = win32.DispatchEx("Excel.Application")
+        log("✅ 已创建完全独立的 Excel 实例（进程隔离）")
+
+        excel.Visible = False
+        excel.ScreenUpdating = False
+        excel.DisplayAlerts = False
+
+        files = [os.path.join(root, f) for root, _, filenames in os.walk(folder_path)
+                 for f in filenames if f.endswith((".xls", ".xlsx"))]
 
         for file_path in files:
             log(f"🔄 处理中：{file_path}")
+            workbook = None
             try:
+                # 打开文件
                 workbook = excel.Workbooks.Open(file_path)
                 file_modified = False
 
+                # 处理每个工作表
                 for sheet in workbook.Sheets:
-                    if not sheet.Visible:  # 跳过隐藏的 Sheet
+                    if not sheet.Visible:
                         continue
 
-                    used_range = sheet.UsedRange
-                    data = used_range.Value  # 获取整个表格数据
+                    # 替换单元格内容
+                    try:
+                        used_range = sheet.UsedRange
+                        data = used_range.Value
 
-                    if data:
-                        updated = False  # 记录是否修改
-                        new_data = []  # 存储新数据
-
-                        for row in data:
-                            if isinstance(row, tuple):  # 多行数据
-                                new_row = list(row)  # 转换为列表
-                                for col_idx, cell in enumerate(new_row):
-                                    if isinstance(cell, str) and old_text in cell:
-                                        new_row[col_idx] = cell.replace(old_text, new_text)
+                        if data:
+                            updated = False
+                            new_data = []
+                            for row in data:
+                                if isinstance(row, tuple):
+                                    new_row = list(row)
+                                    for col_idx, cell in enumerate(new_row):
+                                        if isinstance(cell, str) and old_text in cell:
+                                            new_row[col_idx] = cell.replace(old_text, new_text)
+                                            updated = True
+                                    new_data.append(tuple(new_row))
+                                else:
+                                    if isinstance(row, str) and old_text in row:
+                                        row = row.replace(old_text, new_text)
                                         updated = True
-                                new_data.append(tuple(new_row))  # 转换回元组
-                            else:  # 单行数据
-                                if isinstance(row, str) and old_text in row:
-                                    row = row.replace(old_text, new_text)
-                                    updated = True
-                                new_data.append(row)
+                                    new_data.append(row)
+                            if updated:
+                                used_range.Value = new_data
+                                file_modified = True
+                    except Exception as e:
+                        log(f"⚠️ 单元格处理异常: {str(e)[:50]}")
 
-                        if updated:
-                            used_range.Value = new_data  # 批量写回 Excel
-                            file_modified = True
+                    # 替换页眉页脚
+                    try:
+                        for attr in ["LeftHeader", "CenterHeader", "RightHeader",
+                                    "LeftFooter", "CenterFooter", "RightFooter"]:
+                            val = getattr(sheet.PageSetup, attr)
+                            if old_text in val:
+                                setattr(sheet.PageSetup, attr, val.replace(old_text, new_text))
+                                file_modified = True
+                    except Exception as e:
+                        log(f"⚠️ 页眉页脚处理异常: {str(e)[:50]}")
 
+                # 保存修改
                 if file_modified:
                     workbook.Save()
-                    log(f"✅ 已修改并保存：{file_path}")
-                workbook.Close(SaveChanges=True)
-            except Exception as e:
-                log(f"❌ 处理错误 {file_path}: {e}")
+                    log(f"💾 已保存: {os.path.basename(file_path)}")
+                else:
+                    log(f"⏭️ 未修改: {os.path.basename(file_path)}")
 
-        # 关闭 Excel
-        excel.Quit()
-        del excel
-        gc.collect()  # 回收资源
-        log("🎉 所有 Excel 处理完成！")
+            except Exception as e:
+                log(f"❌ 文件处理失败: {os.path.basename(file_path)}\n    {str(e)[:100]}")
+            finally:
+                # 确保关闭工作簿
+                if workbook:
+                    workbook.Close(SaveChanges=False)
+                    del workbook
+                    gc.collect()
+
+        log("🎉 所有文件处理完成！")
 
     except Exception as e:
-        log(f"❌ Excel 处理失败：{e}")
+        log(f"❌ 致命错误: {str(e)}")
+    finally:
+        # 安全释放资源（关键修改）
+        if excel:
+            log("🔒 正在安全释放资源...")
+            try:
+                # 关闭所有残留工作簿
+                while excel.Workbooks.Count > 0:
+                    wb = excel.Workbooks[0]
+                    wb.Close(SaveChanges=False)
+                    del wb
+                # 不调用Quit()，避免影响其他实例
+                del excel
+                gc.collect()
+                log("✅ 资源已完全释放")
+            except Exception as e:
+                log(f"⚠️ 资源释放异常: {str(e)[:50]}")
 
-# 创建 GUI 界面
+# ----------------- GUI 界面 --------------------
 root = tk.Tk()
-root.title("Excel 文本批量替换工具")
-root.geometry("600x400")
+root.title("Excel 文本批量替换工具 （）")
+root.geometry("680x500")
 
-# 选择文件夹
-tk.Label(root, text="选择文件夹:").pack()
-folder_frame = tk.Frame(root)
-folder_frame.pack(fill="x", padx=10)
-folder_entry = tk.Entry(folder_frame, width=50)
+style = ttk.Style()
+style.configure("TNotebook", tabposition="nw")
+style.configure("TFrame", background="#f0f0f0")
+
+notebook = ttk.Notebook(root)
+notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+# 主界面
+frame_main = ttk.Frame(notebook)
+notebook.add(frame_main, text="主界面")
+
+tk.Label(frame_main, text="选择文件夹:", font=("微软雅黑", 10)).pack(pady=5)
+folder_frame = ttk.Frame(frame_main)
+folder_frame.pack(fill="x", padx=20)
+folder_entry = ttk.Entry(folder_frame, width=50)
 folder_entry.pack(side="left", fill="x", expand=True)
-tk.Button(folder_frame, text="浏览", command=select_folder).pack(side="right")
+ttk.Button(folder_frame, text="浏览", command=select_folder).pack(side="right")
 
-# 旧文本输入框
-tk.Label(root, text="原文本:").pack()
-old_text_entry = tk.Entry(root, width=50)
+ttk.Label(frame_main, text="原文本:", font=("微软雅黑", 10)).pack(pady=5)
+old_text_entry = ttk.Entry(frame_main, width=50)
 old_text_entry.pack()
 
-# 新文本输入框
-tk.Label(root, text="替换为:").pack()
-new_text_entry = tk.Entry(root, width=50)
+ttk.Label(frame_main, text="替换为:", font=("微软雅黑", 10)).pack(pady=5)
+new_text_entry = ttk.Entry(frame_main, width=50)
 new_text_entry.pack()
 
-# 执行按钮
-tk.Button(root, text="开始替换", command=start_replacement, bg="green", fg="white").pack(pady=10)
+ttk.Button(frame_main, text="开始替换", command=start_replacement, style="Accent.TButton").pack(pady=15)
 
-# 日志输出框
-log_text = scrolledtext.ScrolledText(root, width=70, height=10)
-log_text.pack(padx=10, pady=10)
+# 日志区域
+log_frame = ttk.Frame(frame_main)
+log_frame.pack(fill="both", expand=True, padx=10, pady=5)
+log_text = scrolledtext.ScrolledText(log_frame, width=85, height=15, font=("Consolas", 9))
+log_text.pack(fill="both", expand=True)
 
-# 运行 GUI
+# 关于界面
+frame_about = ttk.Frame(notebook)
+notebook.add(frame_about, text="关于")
+about_text = """ Excel 批量替换工具 
+
+ : )
+
+
+"""
+ttk.Label(frame_about, text=about_text, font=("微软雅黑", 11), justify="left").pack(padx=30, pady=30, anchor="w")
+
 root.mainloop()
