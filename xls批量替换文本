@@ -3,8 +3,8 @@ import threading
 import gc
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
-import win32com.client as win32
 from tkinter import ttk
+import xlwings as xw
 
 def log(message):
     log_text.insert(tk.END, message + "\n")
@@ -32,85 +32,70 @@ def replace_excel_text():
         return
 
     log("✅ 开始处理 Excel 文件...")
-    excel = None  # 声明在外部以便finally访问
+    app = None
 
     try:
-        # 创建全新的独立Excel进程（关键修改）
-        excel = win32.DispatchEx("Excel.Application")
-        log("✅ 已创建完全独立的 Excel 实例（进程隔离）")
-
-        excel.Visible = False
-        excel.ScreenUpdating = False
-        excel.DisplayAlerts = False
-
+        app = xw.App(visible=False)
         files = [os.path.join(root, f) for root, _, filenames in os.walk(folder_path)
-                 for f in filenames if f.endswith((".xls", ".xlsx"))]
+                 for f in filenames if f.lower().endswith((".xls", ".xlsx"))]
 
         for file_path in files:
             log(f"🔄 处理中：{file_path}")
-            workbook = None
+            wb = None
             try:
-                # 打开文件
-                workbook = excel.Workbooks.Open(file_path)
+                # 设置更新链接为False，避免.xls文件弹出更新链接提示
+                wb = app.books.open(file_path, update_links=False)
                 file_modified = False
 
-                # 处理每个工作表
-                for sheet in workbook.Sheets:
-                    if not sheet.Visible:
-                        continue
-
+                for sheet in wb.sheets:
                     # 替换单元格内容
                     try:
-                        used_range = sheet.UsedRange
-                        data = used_range.Value
-
-                        if data:
-                            updated = False
-                            new_data = []
-                            for row in data:
-                                if isinstance(row, tuple):
-                                    new_row = list(row)
-                                    for col_idx, cell in enumerate(new_row):
-                                        if isinstance(cell, str) and old_text in cell:
-                                            new_row[col_idx] = cell.replace(old_text, new_text)
-                                            updated = True
-                                    new_data.append(tuple(new_row))
-                                else:
-                                    if isinstance(row, str) and old_text in row:
-                                        row = row.replace(old_text, new_text)
-                                        updated = True
-                                    new_data.append(row)
-                            if updated:
-                                used_range.Value = new_data
-                                file_modified = True
+                        used_range = sheet.used_range
+                        if used_range:
+                            data = used_range.value
+                            if data:
+                                updated = False
+                                if isinstance(data, list):
+                                    for i in range(len(data)):
+                                        row = data[i]
+                                        if isinstance(row, list):
+                                            for j in range(len(row)):
+                                                cell = row[j]
+                                                if isinstance(cell, str) and old_text in cell:
+                                                    row[j] = cell.replace(old_text, new_text)
+                                                    updated = True
+                                    if updated:
+                                        used_range.value = data
+                                        file_modified = True
+                                elif isinstance(data, str) and old_text in data:
+                                    used_range.value = data.replace(old_text, new_text)
+                                    file_modified = True
                     except Exception as e:
                         log(f"⚠️ 单元格处理异常: {str(e)[:50]}")
 
                     # 替换页眉页脚
                     try:
+                        ps = sheet.api.PageSetup
                         for attr in ["LeftHeader", "CenterHeader", "RightHeader",
-                                    "LeftFooter", "CenterFooter", "RightFooter"]:
-                            val = getattr(sheet.PageSetup, attr)
-                            if old_text in val:
-                                setattr(sheet.PageSetup, attr, val.replace(old_text, new_text))
+                                     "LeftFooter", "CenterFooter", "RightFooter"]:
+                            val = getattr(ps, attr)
+                            if val and old_text in val:
+                                setattr(ps, attr, val.replace(old_text, new_text))
                                 file_modified = True
                     except Exception as e:
                         log(f"⚠️ 页眉页脚处理异常: {str(e)[:50]}")
 
-                # 保存修改
                 if file_modified:
-                    workbook.Save()
+                    # 对于.xls文件，使用正确的保存方式
+                    wb.save()
                     log(f"💾 已保存: {os.path.basename(file_path)}")
                 else:
                     log(f"⏭️ 未修改: {os.path.basename(file_path)}")
-
             except Exception as e:
                 log(f"❌ 文件处理失败: {os.path.basename(file_path)}\n    {str(e)[:100]}")
             finally:
-                # 确保关闭工作簿
-                if workbook:
-                    workbook.Close(SaveChanges=False)
-                    del workbook
+                if wb:
+                    wb.close()
                     gc.collect()
 
         log("🎉 所有文件处理完成！")
@@ -118,25 +103,14 @@ def replace_excel_text():
     except Exception as e:
         log(f"❌ 致命错误: {str(e)}")
     finally:
-        # 安全释放资源（关键修改）
-        if excel:
-            log("🔒 正在安全释放资源...")
-            try:
-                # 关闭所有残留工作簿
-                while excel.Workbooks.Count > 0:
-                    wb = excel.Workbooks[0]
-                    wb.Close(SaveChanges=False)
-                    del wb
-                # 不调用Quit()，避免影响其他实例
-                del excel
-                gc.collect()
-                log("✅ 资源已完全释放")
-            except Exception as e:
-                log(f"⚠️ 资源释放异常: {str(e)[:50]}")
+        if app:
+            app.quit()
+            gc.collect()
+            log("✅ 资源已完全释放")
 
 # ----------------- GUI 界面 --------------------
 root = tk.Tk()
-root.title("Excel 文本批量替换工具 （）")
+root.title("Excel 文本批量替换工具（支持 .xls/.xlsx，无需格式转换）")
 root.geometry("680x500")
 
 style = ttk.Style()
@@ -176,11 +150,12 @@ log_text.pack(fill="both", expand=True)
 # 关于界面
 frame_about = ttk.Frame(notebook)
 notebook.add(frame_about, text="关于")
-about_text = """ Excel 批量替换工具 
+about_text = """Excel 批量替换工具（xlwings 版本）
 
- : )
-
-
+- 支持 .xls 和 .xlsx
+- 保留原格式，无需另存
+- 替换内容包括：单元格 + 页眉页脚
+- 进程独立、稳定处理
 """
 ttk.Label(frame_about, text=about_text, font=("微软雅黑", 11), justify="left").pack(padx=30, pady=30, anchor="w")
 
