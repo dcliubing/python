@@ -1,0 +1,157 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+import threading
+import sys
+import os
+import win32com.client
+import xlwings as xw
+
+class RedirectText:
+    def __init__(self, text_widget):
+        self.output = text_widget
+
+    def write(self, string):
+        self.output.insert(tk.END, string)
+        self.output.see(tk.END)
+
+    def flush(self):
+        pass
+
+def browse_folder():
+    folder = filedialog.askdirectory(title="选择要处理的文件夹")
+    if folder:
+        folder_entry.delete(0, tk.END)
+        folder_entry.insert(0, folder)
+
+def start_replacement():
+    folder = folder_entry.get()
+    old_text = old_text_entry.get()
+    new_text = new_text_entry.get()
+    do_excel = excel_var.get()
+    do_cad = cad_var.get()
+
+    log_text.delete(1.0, tk.END)
+
+    if not folder or not os.path.isdir(folder):
+        messagebox.showerror("错误", "请选择有效的文件夹。")
+        return
+    if not old_text or not new_text:
+        messagebox.showerror("错误", "请填写要替换的文字。")
+        return
+    if not (do_excel or do_cad):
+        messagebox.showwarning("提示", "请至少选择一种要替换的文件类型。")
+        return
+
+    threading.Thread(
+        target=lambda: run_tasks(folder, old_text, new_text, do_excel, do_cad),
+        daemon=True
+    ).start()
+
+def run_tasks(folder, old, new, excel, cad):
+    print("\n🚀 开始处理...")
+    files = os.listdir(folder)
+
+    if excel:
+        for f in files:
+            if f.startswith('~') or f.startswith('~$'):
+                continue
+            if f.lower().endswith(('.xls', '.xlsx')):
+                try:
+                    path = os.path.join(folder, f)
+                    print(f"➡️ Excel: {f}")
+                    app = xw.App(visible=False)
+                    wb = app.books.open(path)
+                    for sheet in wb.sheets:
+                        data = sheet.used_range.options(ndim=2).value
+                        if data:
+                            changed = False
+                            for r, row in enumerate(data):
+                                for c, val in enumerate(row):
+                                    if isinstance(val, str) and old in val:
+                                        data[r][c] = val.replace(old, new)
+                                        changed = True
+                            if changed:
+                                sheet.used_range.options(ndim=2).value = data
+                    wb.save()
+                    wb.close()
+                    app.quit()
+                    print("  ✅ 完成")
+                except Exception as e:
+                    print(f"  ❌ 错误: {e}")
+
+    if cad:
+        try:
+            acad = win32com.client.Dispatch("AutoCAD.Application")
+            acad.Visible = False
+            for f in files:
+                if f.startswith('~') or f.startswith('~$'):
+                    continue
+                if f.lower().endswith(".dwg"):
+                    try:
+                        path = os.path.join(folder, f)
+                        print(f"➡️ CAD: {f}")
+                        doc = acad.Documents.Open(str(path))
+                        ms = doc.ModelSpace
+                        changed = 0
+                        for entity in ms:
+                            if entity.ObjectName == "AcDbText" and old in entity.TextString:
+                                entity.TextString = entity.TextString.replace(old, new)
+                                changed += 1
+                            elif entity.ObjectName == "AcDbMText" and old in entity.TextString:
+                                entity.TextString = entity.TextString.replace(old, new)
+                                changed += 1
+                            elif entity.ObjectName == "AcDbBlockReference" and hasattr(entity, 'HasAttributes') and entity.HasAttributes:
+                                for attr in entity.GetAttributes():
+                                    if old in attr.TextString:
+                                        attr.TextString = attr.TextString.replace(old, new)
+                                        changed += 1
+                        if changed:
+                            doc.Save()
+                            print(f"  ✅ 替换 {changed} 处")
+                        else:
+                            print("  ⚠️ 未找到匹配")
+                        doc.Close()
+                    except Exception as e:
+                        print(f"  ❌ 错误: {e}")
+        except Exception as e:
+            print(f"❌ 启动 AutoCAD 失败: {e}")
+
+    print("\n✅ 所有任务完成。")
+
+# ----------------- GUI ---------------------
+root = tk.Tk()
+root.title("批量替换工具（Excel / CAD）")
+root.geometry("720x480")
+root.resizable(False, False)
+
+tk.Label(root, text="选择文件夹：").grid(row=0, column=0, sticky="e", padx=10, pady=10)
+folder_entry = tk.Entry(root, width=60)
+folder_entry.grid(row=0, column=1, padx=5)
+tk.Button(root, text="浏览...", command=browse_folder).grid(row=0, column=2, padx=5)
+
+tk.Label(root, text="原文字：").grid(row=1, column=0, sticky="e", padx=10, pady=10)
+old_text_entry = tk.Entry(root, width=60)
+old_text_entry.grid(row=1, column=1, columnspan=2, padx=5)
+
+tk.Label(root, text="替换为：").grid(row=2, column=0, sticky="e", padx=10, pady=10)
+new_text_entry = tk.Entry(root, width=60)
+new_text_entry.grid(row=2, column=1, columnspan=2, padx=5)
+
+excel_var = tk.BooleanVar(value=True)
+cad_var = tk.BooleanVar(value=True)
+
+type_frame = tk.LabelFrame(root, text="替换文件类型")
+type_frame.grid(row=3, column=0, columnspan=3, padx=20, pady=10, sticky="w")
+tk.Checkbutton(type_frame, text="Excel (.xls/.xlsx)", variable=excel_var).pack(side="left", padx=10, pady=5)
+tk.Checkbutton(type_frame, text="CAD (.dwg)", variable=cad_var).pack(side="left", padx=10, pady=5)
+
+tk.Button(root, text="开始替换", width=20, height=2, bg="#4CAF50", fg="white", command=start_replacement)\
+    .grid(row=4, column=1, pady=10)
+
+log_text = scrolledtext.ScrolledText(root, width=100, height=15, font=("Consolas", 10))
+log_text.grid(row=5, column=0, columnspan=3, padx=10, pady=10)
+
+sys.stdout = RedirectText(log_text)
+sys.stderr = RedirectText(log_text)
+
+root.mainloop()
