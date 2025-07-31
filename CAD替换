@@ -1,0 +1,139 @@
+import win32com.client
+import os
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+import sys
+
+class RedirectText:
+    def __init__(self, text_widget):
+        self.output = text_widget
+
+    def write(self, string):
+        self.output.insert(tk.END, string)
+        self.output.see(tk.END)
+
+    def flush(self):
+        pass
+
+def replace_text_in_dwg(dwg_path, old_text, new_text, acad):
+    try:
+        print(f"\n➡️ 处理文件: {dwg_path}")
+        doc = acad.Documents.Open(dwg_path)
+        time.sleep(1)
+
+        if not hasattr(doc, "ModelSpace"):
+            print("  ❌ 无法访问 ModelSpace，可能文件损坏。")
+            doc.Close(False)
+            return
+
+        ms = doc.ModelSpace
+        changed = 0
+
+        for entity in ms:
+            if entity.ObjectName == "AcDbText" and old_text in entity.TextString:
+                entity.TextString = entity.TextString.replace(old_text, new_text)
+                print(f"  🔄 TEXT 替换: {old_text} -> {new_text}")
+                changed += 1
+
+            elif entity.ObjectName == "AcDbMText" and old_text in entity.TextString:
+                entity.TextString = entity.TextString.replace(old_text, new_text)
+                print(f"  🔄 MTEXT 替换: {old_text} -> {new_text}")
+                changed += 1
+
+            elif entity.ObjectName == "AcDbBlockReference":
+                try:
+                    if entity.HasAttributes:
+                        for attr in entity.GetAttributes():
+                            if old_text in attr.TextString:
+                                attr.TextString = attr.TextString.replace(old_text, new_text)
+                                print(f"  🔄 块属性替换: {old_text} -> {new_text}")
+                                changed += 1
+                except Exception as attr_err:
+                    print(f"    ⚠️ 块属性处理失败: {attr_err}")
+
+        if changed > 0:
+            doc.Save()
+            print(f"  ✅ 保存成功，共替换 {changed} 项。")
+        else:
+            print("  ⚠️ 未找到匹配项。")
+
+        doc.Close(False)
+
+    except Exception as e:
+        print(f"❌ 错误处理文件 {dwg_path}: {e}")
+
+def browse_folder():
+    folder = filedialog.askdirectory(title="选择包含 DWG 文件的文件夹")
+    if folder:
+        folder_entry.delete(0, tk.END)
+        folder_entry.insert(0, folder)
+
+def start_replacement():
+    folder = folder_entry.get()
+    old_text = old_text_entry.get()
+    new_text = new_text_entry.get()
+    log_text.delete(1.0, tk.END)
+
+    if not folder or not os.path.isdir(folder):
+        messagebox.showerror("错误", "请选择有效的文件夹")
+        return
+    if not old_text:
+        messagebox.showerror("错误", "请输入要替换的旧文字")
+        return
+
+    dwg_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".dwg")]
+    if not dwg_files:
+        messagebox.showwarning("未找到文件", "所选目录中未找到 DWG 文件")
+        return
+
+    try:
+        print("🚀 启动 AutoCAD 中...")
+        acad = win32com.client.Dispatch("AutoCAD.Application")
+        acad.Visible = False
+        time.sleep(2)
+
+        for dwg_path in dwg_files:
+            replace_text_in_dwg(dwg_path, old_text, new_text, acad)
+
+        print(f"\n✅ 所有 DWG 文件处理完成，共处理 {len(dwg_files)} 个文件。")
+        messagebox.showinfo("完成", f"所有 DWG 文件处理完成！共处理 {len(dwg_files)} 个文件。")
+
+    except Exception as e:
+        messagebox.showerror("AutoCAD 启动失败", str(e))
+
+# ------------------ 界面部分 ------------------
+root = tk.Tk()
+root.title("批量替换 DWG 文件文字")
+root.geometry("700x500")
+root.resizable(False, False)
+
+# 文件夹选择
+tk.Label(root, text="选择 DWG 文件夹：").grid(row=0, column=0, sticky="e", padx=10, pady=10)
+folder_entry = tk.Entry(root, width=50)
+folder_entry.grid(row=0, column=1, padx=5)
+tk.Button(root, text="浏览...", command=browse_folder).grid(row=0, column=2, padx=5)
+
+# 旧文字
+tk.Label(root, text="要替换的旧文字：").grid(row=1, column=0, sticky="e", padx=10, pady=10)
+old_text_entry = tk.Entry(root, width=50)
+old_text_entry.grid(row=1, column=1, columnspan=2, padx=5)
+
+# 新文字
+tk.Label(root, text="替换为的新文字：").grid(row=2, column=0, sticky="e", padx=10, pady=10)
+new_text_entry = tk.Entry(root, width=50)
+new_text_entry.grid(row=2, column=1, columnspan=2, padx=5)
+
+# 替换按钮
+tk.Button(root, text="开始替换", width=20, height=2, bg="#4CAF50", fg="white", command=start_replacement)\
+    .grid(row=3, column=1, pady=15)
+
+# 日志框
+log_text = scrolledtext.ScrolledText(root, width=85, height=15)
+log_text.grid(row=4, column=0, columnspan=3, padx=10, pady=10)
+
+# 重定向 print 到日志框
+sys.stdout = RedirectText(log_text)
+sys.stderr = RedirectText(log_text)
+
+root.mainloop()
