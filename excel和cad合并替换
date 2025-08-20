@@ -3,14 +3,11 @@ import threading
 import gc
 import time
 import tkinter as tk
+import tkinter.ttk as ttk
 from tkinter import filedialog, scrolledtext, messagebox
-from tkinter import ttk
-import sys
-
-# Excel 用到的库
 import xlwings as xw
-# CAD 用到的库
 import win32com.client
+import sys
 
 # ----------------- 日志统一输出 -----------------
 class RedirectText:
@@ -25,13 +22,12 @@ class RedirectText:
     def flush(self):
         pass
 
-
 def log(message):
     log_text.insert(tk.END, message + "\n")
     log_text.yview(tk.END)
 
-# ----------------- Excel 替换函数 -----------------
-def replace_excel_text(folder_path, old_text, new_text):
+# ----------------- Excel 替换函数（详细日志版） -----------------
+def replace_excel_text(folder_path, old_texts, new_texts):
     log("✅ 开始处理 Excel 文件...")
     app = None
     try:
@@ -40,7 +36,7 @@ def replace_excel_text(folder_path, old_text, new_text):
                  for f in filenames if f.lower().endswith((".xls", ".xlsx")) and not f.startswith('~$')]
 
         for file_path in files:
-            log(f"🔄 处理中：{file_path}")
+            log(f"\n➡️ 处理中：{file_path}")
             wb = None
             try:
                 wb = app.books.open(file_path, update_links=False)
@@ -59,34 +55,47 @@ def replace_excel_text(folder_path, old_text, new_text):
                                         if isinstance(row, list):
                                             for j in range(len(row)):
                                                 cell = row[j]
-                                                if isinstance(cell, str) and old_text in cell:
-                                                    row[j] = cell.replace(old_text, new_text)
-                                                    updated = True
+                                                if isinstance(cell, str):
+                                                    for old, new in zip(old_texts, new_texts):
+                                                        if old and old in cell:
+                                                            new_cell = cell.replace(old, new)
+                                                            log(f"  🔄 {sheet.name}!{sheet.range((i+1,j+1)).address} : '{cell}' → '{new_cell}'")
+                                                            row[j] = new_cell
+                                                            updated = True
                                     if updated:
                                         used_range.value = data
                                         file_modified = True
-                                elif isinstance(data, str) and old_text in data:
-                                    used_range.value = data.replace(old_text, new_text)
-                                    file_modified = True
+                                elif isinstance(data, str):
+                                    for old, new in zip(old_texts, new_texts):
+                                        if old and old in data:
+                                            new_data = data.replace(old, new)
+                                            log(f"  🔄 {sheet.name}!{used_range.address} : '{data}' → '{new_data}'")
+                                            used_range.value = new_data
+                                            file_modified = True
                     except Exception as e:
                         log(f"⚠️ 单元格处理异常: {str(e)[:50]}")
 
+                    # 页眉页脚处理
                     try:
                         ps = sheet.api.PageSetup
                         for attr in ["LeftHeader", "CenterHeader", "RightHeader",
                                      "LeftFooter", "CenterFooter", "RightFooter"]:
                             val = getattr(ps, attr)
-                            if val and old_text in val:
-                                setattr(ps, attr, val.replace(old_text, new_text))
-                                file_modified = True
+                            if val:
+                                for old, new in zip(old_texts, new_texts):
+                                    if old and old in val:
+                                        new_val = val.replace(old, new)
+                                        setattr(ps, attr, new_val)
+                                        file_modified = True
+                                        log(f"  🔄 {sheet.name} {attr} : '{val}' → '{new_val}'")
                     except Exception as e:
                         log(f"⚠️ 页眉页脚处理异常: {str(e)[:50]}")
 
                 if file_modified:
                     wb.save()
-                    log(f"💾 已保存: {os.path.basename(file_path)}")
+                    log(f"  💾 已保存: {os.path.basename(file_path)}")
                 else:
-                    log(f"⏭️ 未修改: {os.path.basename(file_path)}")
+                    log(f"  ⏭️ 未修改: {os.path.basename(file_path)}")
             except Exception as e:
                 log(f"❌ 文件处理失败: {os.path.basename(file_path)}\n    {str(e)[:100]}")
             finally:
@@ -103,8 +112,9 @@ def replace_excel_text(folder_path, old_text, new_text):
             gc.collect()
             log("✅ Excel 资源已释放")
 
+
 # ----------------- CAD 替换函数 -----------------
-def replace_text_in_dwg(dwg_path, old_text, new_text, acad):
+def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad):
     try:
         print(f"\n➡️ 处理文件: {dwg_path}")
         doc = acad.Documents.Open(dwg_path)
@@ -120,22 +130,21 @@ def replace_text_in_dwg(dwg_path, old_text, new_text, acad):
         changed = 0
         for entity in ms:
             try:
-                if entity.ObjectName == "AcDbText" and old_text in entity.TextString:
-                    entity.TextString = entity.TextString.replace(old_text, new_text)
-                    print(f"  🔄 TEXT 替换: {old_text} -> {new_text}")
-                    changed += 1
-                elif entity.ObjectName == "AcDbMText" and old_text in entity.TextString:
-                    entity.TextString = entity.TextString.replace(old_text, new_text)
-                    print(f"  🔄 MTEXT 替换: {old_text} -> {new_text}")
-                    changed += 1
+                if entity.ObjectName in ["AcDbText", "AcDbMText"]:
+                    for old, new in zip(old_texts, new_texts):
+                        if old and old in entity.TextString:
+                            entity.TextString = entity.TextString.replace(old, new)
+                            print(f"  🔄 {entity.ObjectName} 替换: {old} -> {new}")
+                            changed += 1
                 elif entity.ObjectName == "AcDbBlockReference":
                     if entity.HasAttributes:
                         for attr in entity.GetAttributes():
-                            if old_text in attr.TextString:
-                                attr.TextString = attr.TextString.replace(old_text, new_text)
-                                attr.Update()
-                                changed += 1
-                                print(f"  🔄 块属性文字替换完成")
+                            for old, new in zip(old_texts, new_texts):
+                                if old and old in attr.TextString:
+                                    attr.TextString = attr.TextString.replace(old, new)
+                                    attr.Update()
+                                    changed += 1
+                                    print(f"  🔄 块属性文字替换完成: {old} -> {new}")
             except Exception as e_entity:
                 print(f"    ⚠️ 实体处理异常: {e_entity}")
 
@@ -149,8 +158,7 @@ def replace_text_in_dwg(dwg_path, old_text, new_text, acad):
     except Exception as e:
         print(f"❌ 错误处理文件 {dwg_path}: {e}")
 
-
-def replace_cad_text(folder, old_text, new_text):
+def replace_cad_text(folder, old_texts, new_texts):
     dwg_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".dwg")]
     if not dwg_files:
         log("⚠️ 未找到 DWG 文件")
@@ -163,7 +171,7 @@ def replace_cad_text(folder, old_text, new_text):
         time.sleep(1)
 
         for dwg_path in dwg_files:
-            replace_text_in_dwg(dwg_path, old_text, new_text, acad)
+            replace_text_in_dwg(dwg_path, old_texts, new_texts, acad)
 
         print(f"\n✅ 所有 DWG 文件处理完成，共处理 {len(dwg_files)} 个文件。")
         messagebox.showinfo("完成", f"DWG 文件处理完成！共处理 {len(dwg_files)} 个文件。")
@@ -173,59 +181,73 @@ def replace_cad_text(folder, old_text, new_text):
 # ----------------- 启动替换线程 -----------------
 def start_replacement():
     folder = folder_entry.get()
-    old_text = old_text_entry.get()
-    new_text = new_text_entry.get()
+    old_texts = [e.get() for e in old_entries]
+    new_texts = [e.get() for e in new_entries]
+
     log_text.delete(1.0, tk.END)
 
     if not folder or not os.path.isdir(folder):
         messagebox.showerror("错误", "请选择有效的文件夹")
         return
-    if not old_text or not new_text:
-        messagebox.showerror("错误", "请输入要替换的文字")
+    if not any(old_texts) or not any(new_texts):
+        messagebox.showerror("错误", "请输入至少一对替换文字")
         return
 
     def task():
         if excel_var.get():
-            replace_excel_text(folder, old_text, new_text)
+            replace_excel_text(folder, old_texts, new_texts)
         if cad_var.get():
-            replace_cad_text(folder, old_text, new_text)
+            replace_cad_text(folder, old_texts, new_texts)
 
     threading.Thread(target=task, daemon=True).start()
 
 # ----------------- GUI 界面 -----------------
 root = tk.Tk()
 root.title("批量替换 Excel 和 CAD 文件文字")
-root.geometry("750x600")
+root.geometry("800x700")
 root.resizable(False, False)
 
-# 选择文件夹
+# 文件夹选择
 tk.Label(root, text="选择文件夹：").grid(row=0, column=0, sticky="e", padx=10, pady=10)
-folder_entry = tk.Entry(root, width=50)
+folder_entry = tk.Entry(root, width=72)
 folder_entry.grid(row=0, column=1, padx=5)
 tk.Button(root, text="浏览...", command=lambda: folder_entry.insert(0, filedialog.askdirectory())).grid(row=0, column=2, padx=5)
 
-# 旧文字
-tk.Label(root, text="要替换的旧文字：").grid(row=1, column=0, sticky="e", padx=10, pady=10)
-old_text_entry = tk.Entry(root, width=50)
-old_text_entry.grid(row=1, column=1, columnspan=2, padx=5)
+# 替换文字输入
+old_entries, new_entries = [], []
+frame = tk.LabelFrame(root, text="批量替换文字（最多5组）", padx=10, pady=10)
+frame.grid(row=1, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
 
-# 新文字
-tk.Label(root, text="替换为的新文字：").grid(row=2, column=0, sticky="e", padx=10, pady=10)
-new_text_entry = tk.Entry(root, width=50)
-new_text_entry.grid(row=2, column=1, columnspan=2, padx=5)
+for i in range(5):
+    row_index = i * 2  # 每组占两行
+    # 标签和输入框
+    tk.Label(frame, text=f"旧文字 {i+1}:").grid(row=row_index, column=0, sticky="e", pady=4)
+    old_entry = tk.Entry(frame, width=40)
+    old_entry.grid(row=row_index, column=1, pady=4, padx=(0, 50))
+    old_entries.append(old_entry)
+
+    tk.Label(frame, text=f"新文字 {i+1}:").grid(row=row_index, column=2, sticky="e", pady=4)
+    new_entry = tk.Entry(frame, width=40)
+    new_entry.grid(row=row_index, column=3, pady=4, padx=5)
+    new_entries.append(new_entry)
+
+    # 分隔线（最后一组不加）
+    if i < 4:
+        sep = ttk.Separator(frame, orient='horizontal')
+        sep.grid(row=row_index+1, column=0, columnspan=4, sticky="ew", pady=5)
 
 # 勾选框
 excel_var = tk.BooleanVar(value=True)
-cad_var = tk.BooleanVar(value=False)
-tk.Checkbutton(root, text="处理 Excel 文件", variable=excel_var).grid(row=3, column=1, sticky="w", padx=20)
-tk.Checkbutton(root, text="处理 CAD 文件", variable=cad_var).grid(row=3, column=1, sticky="e", padx=20)
+cad_var = tk.BooleanVar(value=True)
+tk.Checkbutton(root, text="处理 Excel 文件", variable=excel_var).grid(row=2, column=1, sticky="w", padx=20)
+tk.Checkbutton(root, text="处理 CAD 文件", variable=cad_var).grid(row=2, column=1, sticky="e", padx=20)
 
 # 开始按钮
-tk.Button(root, text="开始替换", width=20, height=2, bg="#4CAF50", fg="white", command=start_replacement).grid(row=4, column=1, pady=15)
+tk.Button(root, text="开始替换", width=20, height=2, bg="#4CAF50", fg="white", command=start_replacement).grid(row=3, column=1, pady=15)
 
 # 日志框
-log_text = scrolledtext.ScrolledText(root, width=95, height=20)
-log_text.grid(row=5, column=0, columnspan=3, padx=10, pady=10)
+log_text = scrolledtext.ScrolledText(root, width=107, height=20)
+log_text.grid(row=4, column=0, columnspan=3, padx=10, pady=10)
 
 # 重定向 stdout/stderr
 sys.stdout = RedirectText(log_text)
