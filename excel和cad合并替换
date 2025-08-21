@@ -174,9 +174,8 @@ def replace_cad_text(folder, old_texts, new_texts):
             replace_text_in_dwg(dwg_path, old_texts, new_texts, acad)
 
         print(f"\n✅ 所有 DWG 文件处理完成，共处理 {len(dwg_files)} 个文件。")
-        messagebox.showinfo("完成", f"DWG 文件处理完成！共处理 {len(dwg_files)} 个文件。")
     except Exception as e:
-        messagebox.showerror("AutoCAD 启动失败", str(e))
+        log(f"❌ AutoCAD 启动失败: {str(e)}")
 
 # ----------------- 启动替换线程 -----------------
 def start_replacement():
@@ -211,7 +210,14 @@ root.resizable(False, False)
 tk.Label(root, text="选择文件夹：").grid(row=0, column=0, sticky="e", padx=10, pady=10)
 folder_entry = tk.Entry(root, width=72)
 folder_entry.grid(row=0, column=1, padx=5)
-tk.Button(root, text="浏览...", command=lambda: folder_entry.insert(0, filedialog.askdirectory())).grid(row=0, column=2, padx=5)
+
+def select_folder():
+    folder = filedialog.askdirectory()
+    if folder:
+        folder_entry.delete(0, tk.END)
+        folder_entry.insert(0, folder)
+
+tk.Button(root, text="浏览...", command=select_folder).grid(row=0, column=2, padx=5)
 
 # 替换文字输入
 old_entries, new_entries = [], []
