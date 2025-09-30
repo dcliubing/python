@@ -1,0 +1,180 @@
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, BooleanVar
+from datetime import datetime
+from openpyxl import load_workbook
+import win32com.client
+
+COMMENT_KEYS = [
+    "工程名称<项目数据表",
+    "装置名称<项目数据表",
+    "项目名称<项目数据表",
+    "设计阶段<项目数据表",
+    "项目代号<项目数据表",
+    "日期",
+]
+
+CAD_ATTRIBUTE_KEYS = [
+    "项目名称",
+    "装置名称",
+    "单体名称",
+    "设计阶段",
+    "项目号",
+    "日期0"
+]
+
+class ExcelCadUpdaterApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Excel & CAD 批量填充工具")
+        self.root.geometry("750x650")
+
+        self.dir_path = tk.StringVar()
+
+        # 目录选择
+        tk.Label(root, text="目标目录：").pack(anchor="w", padx=10, pady=5)
+        dir_frame = tk.Frame(root)
+        dir_frame.pack(fill="x", padx=10)
+        tk.Entry(dir_frame, textvariable=self.dir_path, width=55).pack(side="left", fill="x", expand=True)
+        tk.Button(dir_frame, text="选择目录", command=self.choose_dir).pack(side="left", padx=5)
+
+        # Excel/CAD勾选框
+        self.process_excel_var = BooleanVar(value=True)
+        self.process_cad_var = BooleanVar(value=True)
+        tk.Checkbutton(root, text="处理 Excel", variable=self.process_excel_var).pack(anchor="w", padx=15)
+        tk.Checkbutton(root, text="处理 CAD", variable=self.process_cad_var).pack(anchor="w", padx=15)
+
+        # 输入框
+        self.entries = {}
+        for key in COMMENT_KEYS:
+            frame = tk.Frame(root)
+            frame.pack(fill="x", padx=10, pady=3)
+            tk.Label(frame, text=key, width=20, anchor="w").pack(side="left")
+            entry = tk.Entry(frame, width=45)
+            entry.pack(side="left", fill="x", expand=True)
+            self.entries[key] = entry
+
+        tk.Button(root, text="开始执行", command=self.run).pack(pady=10)
+
+        # 日志显示框
+        tk.Label(root, text="处理日志：").pack(anchor="w", padx=10)
+        self.log_text = scrolledtext.ScrolledText(root, width=90, height=25, state="disabled")
+        self.log_text.pack(padx=10, pady=5, fill="both", expand=True)
+
+    def log(self, msg):
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", msg + "\n")
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
+        self.root.update()
+
+    def choose_dir(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.dir_path.set(folder)
+
+    def run(self):
+        folder = self.dir_path.get()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("错误", "请先选择有效的目录")
+            return
+
+        values = {k: e.get() for k, e in self.entries.items()}
+
+        self.log(f"\n=== 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+
+        count_files = 0
+
+        try:
+            cad_app = win32com.client.Dispatch("AutoCAD.Application")
+            cad_app.Visible = False  # 尝试隐藏 AutoCAD 窗口
+        except Exception as e:
+            self.log(f"[CAD启动失败] 错误: {e}")
+            cad_app = None
+
+        for root_dir, _, files in os.walk(folder):
+            for file in files:
+                filepath = os.path.join(root_dir, file)
+
+                # 处理 Excel
+                if self.process_excel_var.get() and file.endswith(".xlsx") and not file.startswith("~$"):
+                    try:
+                        modified = self.update_excel(filepath, values)
+                        count_files += 1
+                        if modified:
+                            self.log(f"[Excel修改] {filepath}")
+                            for info in modified:
+                                self.log(f"  单元格 {info['cell']} | 批注: {info['comment']} | 新值: {info['value']}")
+                        else:
+                            self.log(f"[Excel未修改] {filepath}")
+                    except Exception as e:
+                        self.log(f"[Excel失败] {filepath} 错误: {e}")
+
+                # 处理 CAD
+                if self.process_cad_var.get() and cad_app and file.lower().endswith(".dwg") and not file.startswith("~$"):
+                    try:
+                        modified = self.update_cad_win32com(cad_app, filepath, values)
+                        count_files += 1
+                        if modified:
+                            self.log(f"[CAD修改] {filepath}")
+                            for attr, val in modified.items():
+                                self.log(f"  属性 {attr} -> {val}")
+                        else:
+                            self.log(f"[CAD未修改] {filepath}")
+                    except Exception as e:
+                        self.log(f"[CAD失败] {filepath} 错误: {e}")
+
+        messagebox.showinfo("完成", f"处理完成，共处理 {count_files} 个文件")
+
+    def update_excel(self, filepath, values):
+        wb = load_workbook(filepath)
+        modified_cells = []
+
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell.comment:
+                        comment_text = cell.comment.text
+                        if comment_text:
+                            comment_text = comment_text.strip().replace("\n", " ")
+                            for key, new_value in values.items():
+                                if key in comment_text:
+                                    cell.value = new_value
+                                    modified_cells.append({
+                                        "cell": f"{sheet.title}!{cell.coordinate}",
+                                        "comment": comment_text,
+                                        "value": new_value
+                                    })
+        if modified_cells:
+            wb.save(filepath)
+        wb.close()
+        return modified_cells
+
+    def update_cad_win32com(self, cad_app, filepath, values):
+        modified_attrs = {}
+        try:
+            doc = cad_app.Documents.Open(filepath, False, True)  # read-write, do not activate window
+            for block_ref in doc.ModelSpace:
+                try:
+                    if block_ref.ObjectName == 'AcDbBlockReference':
+                        for attrib in block_ref.GetAttributes():
+                            tag = attrib.TagString
+                            for i, key in enumerate(COMMENT_KEYS):
+                                if tag == CAD_ATTRIBUTE_KEYS[i]:
+                                    new_value = values.get(key, '')
+                                    if attrib.TextString != new_value:
+                                        attrib.TextString = new_value
+                                        modified_attrs[tag] = new_value
+                except Exception:
+                    continue
+            if modified_attrs:
+                doc.Save()
+            doc.Close()
+        except Exception as e:
+            self.log(f"[CAD操作失败] {filepath} 错误: {e}")
+        return modified_attrs
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ExcelCadUpdaterApp(root)
+    root.mainloop()
