@@ -4,6 +4,8 @@ from tkinter import filedialog, messagebox, scrolledtext, BooleanVar
 from datetime import datetime
 from openpyxl import load_workbook
 import win32com.client
+import pythoncom
+import time
 
 COMMENT_KEYS = [
     "工程名称<项目数据表",
@@ -84,13 +86,24 @@ class ExcelCadUpdaterApp:
         self.log(f"\n=== 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
 
         count_files = 0
+        cad_app = None
 
-        try:
-            cad_app = win32com.client.Dispatch("AutoCAD.Application")
-            cad_app.Visible = False  # 尝试隐藏 AutoCAD 窗口
-        except Exception as e:
-            self.log(f"[CAD启动失败] 错误: {e}")
-            cad_app = None
+        # ---------- CAD 启动/复用逻辑 ----------
+        if self.process_cad_var.get():
+            try:
+                pythoncom.CoInitialize()
+                try:
+                    cad_app = win32com.client.GetActiveObject("AutoCAD.Application")
+                    self.log("[CAD] 检测到已有 AutoCAD 实例，直接复用。")
+                except Exception:
+                    self.log("[CAD] 未检测到运行中的 AutoCAD，正在启动...")
+                    cad_app = win32com.client.Dispatch("AutoCAD.Application")
+                    cad_app.Visible = True
+                    time.sleep(3)
+                    self.log("[CAD] AutoCAD 已启动。")
+            except Exception as e:
+                self.log(f"[CAD启动失败] 错误: {e}")
+                cad_app = None
 
         for root_dir, _, files in os.walk(folder):
             for file in files:
@@ -124,6 +137,7 @@ class ExcelCadUpdaterApp:
                     except Exception as e:
                         self.log(f"[CAD失败] {filepath} 错误: {e}")
 
+        # 不关闭 CAD
         messagebox.showinfo("完成", f"处理完成，共处理 {count_files} 个文件")
 
     def update_excel(self, filepath, values):
@@ -150,29 +164,63 @@ class ExcelCadUpdaterApp:
         wb.close()
         return modified_cells
 
+    # ---------- 改进后的 CAD 函数 ----------
     def update_cad_win32com(self, cad_app, filepath, values):
+        import time
+        import pythoncom
+
         modified_attrs = {}
-        try:
-            doc = cad_app.Documents.Open(filepath, False, True)  # read-write, do not activate window
-            for block_ref in doc.ModelSpace:
-                try:
-                    if block_ref.ObjectName == 'AcDbBlockReference':
-                        for attrib in block_ref.GetAttributes():
-                            tag = attrib.TagString
-                            for i, key in enumerate(COMMENT_KEYS):
-                                if tag == CAD_ATTRIBUTE_KEYS[i]:
-                                    new_value = values.get(key, '')
-                                    if attrib.TextString != new_value:
-                                        attrib.TextString = new_value
-                                        modified_attrs[tag] = new_value
-                except Exception:
-                    continue
-            if modified_attrs:
-                doc.Save()
-            doc.Close()
-        except Exception as e:
-            self.log(f"[CAD操作失败] {filepath} 错误: {e}")
+        max_retry = 2  # 最多重试 2 次
+
+        for attempt in range(1, max_retry + 1):
+            try:
+                pythoncom.CoInitialize()
+                self.log(f"[CAD] 正在打开第 {attempt} 次尝试: {filepath}")
+                doc = cad_app.Documents.Open(filepath, False, False)  # 允许写入
+                time.sleep(1.0)
+
+                # 等待 ModelSpace 可用
+                for _ in range(10):
+                    try:
+                        _ = doc.ModelSpace
+                        break
+                    except Exception:
+                        time.sleep(0.5)
+                else:
+                    raise Exception("ModelSpace 加载超时")
+
+                # 遍历块属性
+                for block_ref in doc.ModelSpace:
+                    try:
+                        if block_ref.ObjectName == 'AcDbBlockReference':
+                            for attrib in block_ref.GetAttributes():
+                                tag = attrib.TagString
+                                for i, key in enumerate(COMMENT_KEYS):
+                                    if tag == CAD_ATTRIBUTE_KEYS[i]:
+                                        new_value = values.get(key, '')
+                                        if attrib.TextString != new_value:
+                                            attrib.TextString = new_value
+                                            modified_attrs[tag] = new_value
+                    except Exception:
+                        continue
+
+                # 保存修改
+                if modified_attrs:
+                    doc.Save()
+                doc.Close(False)
+                time.sleep(0.5)
+                break  # 成功执行则退出重试循环
+
+            except Exception as e:
+                self.log(f"[CAD操作失败] {filepath} 第 {attempt} 次错误: {e}")
+                time.sleep(2.0)
+                if attempt == max_retry:
+                    self.log(f"[CAD跳过文件] 多次尝试失败: {filepath}")
+            finally:
+                pythoncom.CoUninitialize()
+
         return modified_attrs
+
 
 if __name__ == "__main__":
     root = tk.Tk()
