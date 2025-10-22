@@ -22,9 +22,12 @@ class RedirectText:
     def flush(self):
         pass
 
+
 def log(message):
     log_text.insert(tk.END, message + "\n")
     log_text.yview(tk.END)
+    log_text.update()
+
 
 # ----------------- Excel 替换函数（详细日志版） -----------------
 def replace_excel_text(folder_path, old_texts, new_texts):
@@ -113,17 +116,30 @@ def replace_excel_text(folder_path, old_texts, new_texts):
             log("✅ Excel 资源已释放")
 
 
-# ----------------- CAD 替换函数 -----------------
+# ----------------- CAD 替换函数（增强稳定版） -----------------
 def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad):
     try:
-        print(f"\n➡️ 处理文件: {dwg_path}")
+        log(f"\n➡️ 处理文件: {dwg_path}")
+
+        # 打开文件
         doc = acad.Documents.Open(dwg_path)
-        time.sleep(0.5)
+
+        # 计算动态延时（大文件等待更久）
+        file_size_mb = os.path.getsize(dwg_path) / (1024 * 1024)
+        delay_time = 1 + min(file_size_mb / 5, 3)
+        time.sleep(delay_time)
+
+        # 尝试强制刷新视图（帮助加载大型文件）
+        try:
+            doc.Application.ZoomExtents()
+            time.sleep(0.5)
+        except:
+            pass
 
         try:
             ms = doc.ModelSpace
         except Exception:
-            print("  ❌ 文件没有 ModelSpace，可能损坏或非标准 DWG。")
+            log("  ❌ 文件没有 ModelSpace，可能损坏或非标准 DWG。")
             doc.Close(False)
             return
 
@@ -134,48 +150,57 @@ def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad):
                     for old, new in zip(old_texts, new_texts):
                         if old and old in entity.TextString:
                             entity.TextString = entity.TextString.replace(old, new)
-                            print(f"  🔄 {entity.ObjectName} 替换: {old} -> {new}")
                             changed += 1
-                elif entity.ObjectName == "AcDbBlockReference":
-                    if entity.HasAttributes:
-                        for attr in entity.GetAttributes():
-                            for old, new in zip(old_texts, new_texts):
-                                if old and old in attr.TextString:
-                                    attr.TextString = attr.TextString.replace(old, new)
-                                    attr.Update()
-                                    changed += 1
-                                    print(f"  🔄 块属性文字替换完成: {old} -> {new}")
+                            log(f"  🔄 {entity.ObjectName} 替换: {old} -> {new}")
+
+                elif entity.ObjectName == "AcDbBlockReference" and entity.HasAttributes:
+                    for attr in entity.GetAttributes():
+                        for old, new in zip(old_texts, new_texts):
+                            if old and old in attr.TextString:
+                                attr.TextString = attr.TextString.replace(old, new)
+                                attr.Update()
+                                changed += 1
+                                log(f"  🔄 块属性文字替换完成: {old} -> {new}")
             except Exception as e_entity:
-                print(f"    ⚠️ 实体处理异常: {e_entity}")
+                log(f"    ⚠️ 实体处理异常: {e_entity}")
+
+        # 再等待一点，确保属性更新完成
+        time.sleep(0.5)
 
         if changed > 0:
             doc.Save()
-            print(f"  ✅ 保存成功，共替换 {changed} 项。")
+            log(f"  ✅ 保存成功，共替换 {changed} 项。")
         else:
-            print("  ⚠️ 未找到匹配项。")
+            log("  ⚠️ 未找到匹配项。")
 
         doc.Close(False)
+        gc.collect()
+        time.sleep(0.2)
+
     except Exception as e:
-        print(f"❌ 错误处理文件 {dwg_path}: {e}")
+        log(f"❌ 错误处理文件 {dwg_path}: {e}")
+
 
 def replace_cad_text(folder, old_texts, new_texts):
-    dwg_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".dwg")]
+    dwg_files = [os.path.join(folder, f) for f in os.listdir(folder)
+                 if f.lower().endswith(".dwg") and not f.startswith("~$")]
     if not dwg_files:
         log("⚠️ 未找到 DWG 文件")
         return
 
     try:
-        print("🚀 启动 AutoCAD 中...")
+        log("🚀 启动 AutoCAD 中...")
         acad = win32com.client.Dispatch("AutoCAD.Application")
         acad.Visible = False
-        time.sleep(1)
+        time.sleep(2)
 
         for dwg_path in dwg_files:
             replace_text_in_dwg(dwg_path, old_texts, new_texts, acad)
 
-        print(f"\n✅ 所有 DWG 文件处理完成，共处理 {len(dwg_files)} 个文件。")
+        log(f"\n✅ 所有 DWG 文件处理完成，共处理 {len(dwg_files)} 个文件。")
     except Exception as e:
         log(f"❌ AutoCAD 启动失败: {str(e)}")
+
 
 # ----------------- 启动替换线程 -----------------
 def start_replacement():
@@ -200,6 +225,7 @@ def start_replacement():
 
     threading.Thread(target=task, daemon=True).start()
 
+
 # ----------------- GUI 界面 -----------------
 root = tk.Tk()
 root.title("批量替换 Excel 和 CAD 文件文字")
@@ -211,11 +237,13 @@ tk.Label(root, text="选择文件夹：").grid(row=0, column=0, sticky="e", padx
 folder_entry = tk.Entry(root, width=72)
 folder_entry.grid(row=0, column=1, padx=5)
 
+
 def select_folder():
     folder = filedialog.askdirectory()
     if folder:
         folder_entry.delete(0, tk.END)
         folder_entry.insert(0, folder)
+
 
 tk.Button(root, text="浏览...", command=select_folder).grid(row=0, column=2, padx=5)
 
@@ -225,8 +253,7 @@ frame = tk.LabelFrame(root, text="批量替换文字（最多5组）", padx=10, 
 frame.grid(row=1, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
 
 for i in range(5):
-    row_index = i * 2  # 每组占两行
-    # 标签和输入框
+    row_index = i * 2
     tk.Label(frame, text=f"旧文字 {i+1}:").grid(row=row_index, column=0, sticky="e", pady=4)
     old_entry = tk.Entry(frame, width=40)
     old_entry.grid(row=row_index, column=1, pady=4, padx=(0, 50))
@@ -237,10 +264,8 @@ for i in range(5):
     new_entry.grid(row=row_index, column=3, pady=4, padx=5)
     new_entries.append(new_entry)
 
-    # 分隔线（最后一组不加）
     if i < 4:
-        sep = ttk.Separator(frame, orient='horizontal')
-        sep.grid(row=row_index+1, column=0, columnspan=4, sticky="ew", pady=5)
+        ttk.Separator(frame, orient='horizontal').grid(row=row_index+1, column=0, columnspan=4, sticky="ew", pady=5)
 
 # 勾选框
 excel_var = tk.BooleanVar(value=True)
@@ -260,3 +285,5 @@ sys.stdout = RedirectText(log_text)
 sys.stderr = RedirectText(log_text)
 
 root.mainloop()
+
+
