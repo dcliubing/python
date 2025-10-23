@@ -30,13 +30,18 @@ def log(message):
 
 
 # ----------------- Excel 替换函数（详细日志版） -----------------
-def replace_excel_text(folder_path, old_texts, new_texts):
+def replace_excel_text(folder_path, old_texts, new_texts, include_subfolders=False):
     log("✅ 开始处理 Excel 文件...")
     app = None
     try:
         app = xw.App(visible=False)
-        files = [os.path.join(root, f) for root, _, filenames in os.walk(folder_path)
-                 for f in filenames if f.lower().endswith((".xls", ".xlsx")) and not f.startswith('~$')]
+
+        if include_subfolders:
+            files = [os.path.join(root, f) for root, _, filenames in os.walk(folder_path)
+                     for f in filenames if f.lower().endswith((".xls", ".xlsx")) and not f.startswith('~$')]
+        else:
+            files = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
+                     if f.lower().endswith((".xls", ".xlsx")) and not f.startswith('~$')]
 
         for file_path in files:
             log(f"\n➡️ 处理中：{file_path}")
@@ -120,16 +125,12 @@ def replace_excel_text(folder_path, old_texts, new_texts):
 def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad):
     try:
         log(f"\n➡️ 处理文件: {dwg_path}")
-
-        # 打开文件
         doc = acad.Documents.Open(dwg_path)
 
-        # 计算动态延时（大文件等待更久）
         file_size_mb = os.path.getsize(dwg_path) / (1024 * 1024)
         delay_time = 1 + min(file_size_mb / 5, 3)
         time.sleep(delay_time)
 
-        # 尝试强制刷新视图（帮助加载大型文件）
         try:
             doc.Application.ZoomExtents()
             time.sleep(0.5)
@@ -164,7 +165,6 @@ def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad):
             except Exception as e_entity:
                 log(f"    ⚠️ 实体处理异常: {e_entity}")
 
-        # 再等待一点，确保属性更新完成
         time.sleep(0.5)
 
         if changed > 0:
@@ -181,9 +181,14 @@ def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad):
         log(f"❌ 错误处理文件 {dwg_path}: {e}")
 
 
-def replace_cad_text(folder, old_texts, new_texts):
-    dwg_files = [os.path.join(folder, f) for f in os.listdir(folder)
-                 if f.lower().endswith(".dwg") and not f.startswith("~$")]
+def replace_cad_text(folder, old_texts, new_texts, include_subfolders=False):
+    if include_subfolders:
+        dwg_files = [os.path.join(root, f) for root, _, files in os.walk(folder)
+                     for f in files if f.lower().endswith(".dwg") and not f.startswith("~$")]
+    else:
+        dwg_files = [os.path.join(folder, f) for f in os.listdir(folder)
+                     if f.lower().endswith(".dwg") and not f.startswith("~$")]
+
     if not dwg_files:
         log("⚠️ 未找到 DWG 文件")
         return
@@ -207,6 +212,7 @@ def start_replacement():
     folder = folder_entry.get()
     old_texts = [e.get() for e in old_entries]
     new_texts = [e.get() for e in new_entries]
+    include_subfolders = process_subfolders_var.get()
 
     log_text.delete(1.0, tk.END)
 
@@ -219,9 +225,9 @@ def start_replacement():
 
     def task():
         if excel_var.get():
-            replace_excel_text(folder, old_texts, new_texts)
+            replace_excel_text(folder, old_texts, new_texts, include_subfolders)
         if cad_var.get():
-            replace_cad_text(folder, old_texts, new_texts)
+            replace_cad_text(folder, old_texts, new_texts, include_subfolders)
 
     threading.Thread(target=task, daemon=True).start()
 
@@ -229,7 +235,7 @@ def start_replacement():
 # ----------------- GUI 界面 -----------------
 root = tk.Tk()
 root.title("批量替换 Excel 和 CAD 文件文字")
-root.geometry("800x700")
+root.geometry("800x720")
 root.resizable(False, False)
 
 # 文件夹选择
@@ -237,13 +243,11 @@ tk.Label(root, text="选择文件夹：").grid(row=0, column=0, sticky="e", padx
 folder_entry = tk.Entry(root, width=72)
 folder_entry.grid(row=0, column=1, padx=5)
 
-
 def select_folder():
     folder = filedialog.askdirectory()
     if folder:
         folder_entry.delete(0, tk.END)
         folder_entry.insert(0, folder)
-
 
 tk.Button(root, text="浏览...", command=select_folder).grid(row=0, column=2, padx=5)
 
@@ -267,11 +271,17 @@ for i in range(5):
     if i < 4:
         ttk.Separator(frame, orient='horizontal').grid(row=row_index+1, column=0, columnspan=4, sticky="ew", pady=5)
 
-# 勾选框
+# 勾选框区域
 excel_var = tk.BooleanVar(value=True)
 cad_var = tk.BooleanVar(value=True)
-tk.Checkbutton(root, text="处理 Excel 文件", variable=excel_var).grid(row=2, column=1, sticky="w", padx=20)
-tk.Checkbutton(root, text="处理 CAD 文件", variable=cad_var).grid(row=2, column=1, sticky="e", padx=20)
+process_subfolders_var = tk.BooleanVar(value=False)
+
+options_frame = tk.Frame(root)
+options_frame.grid(row=2, column=1, pady=5)
+
+tk.Checkbutton(options_frame, text="处理 Excel 文件", variable=excel_var).pack(side="left", padx=10)
+tk.Checkbutton(options_frame, text="处理 CAD 文件", variable=cad_var).pack(side="left", padx=10)
+tk.Checkbutton(options_frame, text="处理子文件夹", variable=process_subfolders_var).pack(side="left", padx=10)
 
 # 开始按钮
 tk.Button(root, text="开始替换", width=20, height=2, bg="#4CAF50", fg="white", command=start_replacement).grid(row=3, column=1, pady=15)
@@ -285,5 +295,3 @@ sys.stdout = RedirectText(log_text)
 sys.stderr = RedirectText(log_text)
 
 root.mainloop()
-
-
