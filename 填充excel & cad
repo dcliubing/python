@@ -46,6 +46,10 @@ class ExcelCadUpdaterApp:
         tk.Checkbutton(root, text="处理 Excel", variable=self.process_excel_var).pack(anchor="w", padx=15)
         tk.Checkbutton(root, text="处理 CAD", variable=self.process_cad_var).pack(anchor="w", padx=15)
 
+        # ✅ 新增：是否处理子目录
+        self.include_subdirs_var = BooleanVar(value=False)
+        tk.Checkbutton(root, text="处理子目录", variable=self.include_subdirs_var).pack(anchor="w", padx=15)
+
         # 输入框
         self.entries = {}
         for key in COMMENT_KEYS:
@@ -105,7 +109,13 @@ class ExcelCadUpdaterApp:
                 self.log(f"[CAD启动失败] 错误: {e}")
                 cad_app = None
 
-        for root_dir, _, files in os.walk(folder):
+        # ✅ 根据是否处理子目录决定扫描方式
+        if self.include_subdirs_var.get():
+            walker = os.walk(folder)
+        else:
+            walker = [(folder, [], os.listdir(folder))]
+
+        for root_dir, _, files in walker:
             for file in files:
                 filepath = os.path.join(root_dir, file)
 
@@ -137,9 +147,9 @@ class ExcelCadUpdaterApp:
                     except Exception as e:
                         self.log(f"[CAD失败] {filepath} 错误: {e}")
 
-        # 不关闭 CAD
         messagebox.showinfo("完成", f"处理完成，共处理 {count_files} 个文件")
 
+    # ✅ 改进版本：避免重复写入导致边框破坏
     def update_excel(self, filepath, values):
         wb = load_workbook(filepath)
         modified_cells = []
@@ -153,18 +163,19 @@ class ExcelCadUpdaterApp:
                             comment_text = comment_text.strip().replace("\n", " ")
                             for key, new_value in values.items():
                                 if key in comment_text:
-                                    cell.value = new_value
-                                    modified_cells.append({
-                                        "cell": f"{sheet.title}!{cell.coordinate}",
-                                        "comment": comment_text,
-                                        "value": new_value
-                                    })
+                                    # ✅ 仅当值不同才写入，避免触发边框重绘
+                                    if cell.value != new_value:
+                                        cell.value = new_value
+                                        modified_cells.append({
+                                            "cell": f"{sheet.title}!{cell.coordinate}",
+                                            "comment": comment_text,
+                                            "value": new_value
+                                        })
         if modified_cells:
             wb.save(filepath)
         wb.close()
         return modified_cells
 
-    # ---------- 改进后的 CAD 函数 ----------
     def update_cad_win32com(self, cad_app, filepath, values):
         import time
         import pythoncom
@@ -176,10 +187,9 @@ class ExcelCadUpdaterApp:
             try:
                 pythoncom.CoInitialize()
                 self.log(f"[CAD] 正在打开第 {attempt} 次尝试: {filepath}")
-                doc = cad_app.Documents.Open(filepath, False, False)  # 允许写入
+                doc = cad_app.Documents.Open(filepath, False, False)
                 time.sleep(1.0)
 
-                # 等待 ModelSpace 可用
                 for _ in range(10):
                     try:
                         _ = doc.ModelSpace
@@ -189,7 +199,6 @@ class ExcelCadUpdaterApp:
                 else:
                     raise Exception("ModelSpace 加载超时")
 
-                # 遍历块属性
                 for block_ref in doc.ModelSpace:
                     try:
                         if block_ref.ObjectName == 'AcDbBlockReference':
@@ -204,12 +213,11 @@ class ExcelCadUpdaterApp:
                     except Exception:
                         continue
 
-                # 保存修改
                 if modified_attrs:
                     doc.Save()
                 doc.Close(False)
                 time.sleep(0.5)
-                break  # 成功执行则退出重试循环
+                break
 
             except Exception as e:
                 self.log(f"[CAD操作失败] {filepath} 第 {attempt} 次错误: {e}")
