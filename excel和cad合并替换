@@ -8,6 +8,7 @@ from tkinter import filedialog, scrolledtext, messagebox
 import xlwings as xw
 import win32com.client
 import sys
+import pythoncom  # <-- 用于线程级 COM 初始化/反初始化
 
 # ----------------- 日志统一输出 -----------------
 class RedirectText:
@@ -121,73 +122,187 @@ def replace_excel_text(folder_path, old_texts, new_texts, include_subfolders=Fal
             log("✅ Excel 资源已释放")
 
 
-# ----------------- CAD 替换函数（增强稳定版） -----------------
-def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad):
-    try:
-        log(f"\n➡️ 处理文件: {dwg_path}")
-        doc = acad.Documents.Open(dwg_path)
-
-        file_size_mb = os.path.getsize(dwg_path) / (1024 * 1024)
-        delay_time = 1 + min(file_size_mb / 5, 3)
-        time.sleep(delay_time)
-
+# ----------------- 更稳健的 CAD 替换实现 -----------------
+def _get_text_prop(entity):
+    """
+    返回实体上第一个可读的文字属性名与值；兼容不同 AutoCAD 版本的属性名。
+    """
+    for prop in ("TextString", "Text", "Contents"):
         try:
-            doc.Application.ZoomExtents()
-            time.sleep(0.5)
-        except:
-            pass
-
-        try:
-            ms = doc.ModelSpace
+            val = getattr(entity, prop)
+            if val is not None:
+                return prop, val
         except Exception:
-            log("  ❌ 文件没有 ModelSpace，可能损坏或非标准 DWG。")
-            doc.Close(False)
-            return
+            continue
+    return None, None
 
-        changed = 0
-        for entity in ms:
+
+def _set_text_prop(entity, prop, value):
+    """
+    尝试设置实体的文字属性，返回是否成功。
+    """
+    try:
+        setattr(entity, prop, value)
+        return True
+    except Exception:
+        return False
+
+
+def replace_text_in_dwg(dwg_path, old_texts, new_texts, acad, max_retries=3):
+    """
+    打开 dwg 并替换文字。出现可恢复性错误时重试（重开文档）。
+    """
+    attempt = 0
+    while attempt < max_retries:
+        attempt += 1
+        doc = None
+        try:
+            log(f"\n➡️ 处理文件: {dwg_path} （尝试 {attempt}/{max_retries}）")
+            doc = acad.Documents.Open(dwg_path)
+
+            # 根据文件大小适当等待，给 AutoCAD 初始化/渲染一点时间
+            file_size_mb = os.path.getsize(dwg_path) / (1024 * 1024)
+            delay_time = 0.8 + min(file_size_mb / 8, 2)
+            time.sleep(delay_time)
+
             try:
-                if entity.ObjectName in ["AcDbText", "AcDbMText"]:
-                    for old, new in zip(old_texts, new_texts):
-                        if old and old in entity.TextString:
-                            entity.TextString = entity.TextString.replace(old, new)
-                            changed += 1
-                            log(f"  🔄 {entity.ObjectName} 替换: {old} -> {new}")
+                doc.Application.ZoomExtents()
+                time.sleep(0.2)
+            except Exception:
+                pass
 
-                elif entity.ObjectName == "AcDbBlockReference" and entity.HasAttributes:
-                    for attr in entity.GetAttributes():
-                        for old, new in zip(old_texts, new_texts):
-                            if old and old in attr.TextString:
-                                attr.TextString = attr.TextString.replace(old, new)
-                                attr.Update()
-                                changed += 1
-                                log(f"  🔄 块属性文字替换完成: {old} -> {new}")
-            except Exception as e_entity:
-                log(f"    ⚠️ 实体处理异常: {e_entity}")
+            # 尝试访问 ModelSpace 与 PaperSpace
+            spaces = []
+            try:
+                spaces.append(("ModelSpace", doc.ModelSpace))
+            except Exception:
+                log("  ⚠️ 无法访问 ModelSpace。")
+            try:
+                # PaperSpace 有时不可用或叫 Layouts，但 doc.PaperSpace 在多数情况下可用
+                spaces.append(("PaperSpace", doc.PaperSpace))
+            except Exception:
+                pass  # 忽略
 
-        time.sleep(0.5)
+            if not spaces:
+                log("  ❌ 未找到可用空间（ModelSpace/PaperSpace）。")
+                if doc:
+                    try:
+                        doc.Close(False)
+                    except Exception:
+                        pass
+                return
 
-        if changed > 0:
-            doc.Save()
-            log(f"  ✅ 保存成功，共替换 {changed} 项。")
-        else:
-            log("  ⚠️ 未找到匹配项。")
+            changed = 0
 
-        doc.Close(False)
-        gc.collect()
-        time.sleep(0.2)
+            for space_name, space in spaces:
+                try:
+                    for entity in space:
+                        try:
+                            # 普通文字 / 多行文字
+                            prop_name, text_val = _get_text_prop(entity)
+                            if prop_name and isinstance(text_val, str):
+                                new_val = text_val
+                                for old, new in zip(old_texts, new_texts):
+                                    if old and old in new_val:
+                                        new_val = new_val.replace(old, new)
+                                if new_val != text_val:
+                                    ok = _set_text_prop(entity, prop_name, new_val)
+                                    if ok:
+                                        changed += 1
+                                        log(f"  🔄 [{space_name}] {entity.ObjectName} 替换: '{text_val}' -> '{new_val}'")
+                                    else:
+                                        log(f"  ⚠️ 无法设置属性 {prop_name} 于实体 {entity.ObjectName}")
 
-    except Exception as e:
-        log(f"❌ 错误处理文件 {dwg_path}: {e}")
+                            # 处理块引用及其属性
+                            if entity.ObjectName == "AcDbBlockReference":
+                                try:
+                                    if getattr(entity, "HasAttributes", False):
+                                        for attr in entity.GetAttributes():
+                                            try:
+                                                prop_name_attr, text_val_attr = _get_text_prop(attr)
+                                                if prop_name_attr and isinstance(text_val_attr, str):
+                                                    new_val_attr = text_val_attr
+                                                    for old, new in zip(old_texts, new_texts):
+                                                        if old and old in new_val_attr:
+                                                            new_val_attr = new_val_attr.replace(old, new)
+                                                    if new_val_attr != text_val_attr:
+                                                        ok_attr = _set_text_prop(attr, prop_name_attr, new_val_attr)
+                                                        try:
+                                                            attr.Update()
+                                                        except Exception:
+                                                            pass
+                                                        if ok_attr:
+                                                            changed += 1
+                                                            log(f"  🔄 [{space_name}] 块属性替换: '{text_val_attr}' -> '{new_val_attr}'")
+                                            except Exception as e_attr:
+                                                log(f"    ⚠️ 块属性异常: {str(e_attr)[:120]}")
+                                except Exception:
+                                    pass
+
+                        except Exception as e_entity:
+                            log(f"    ⚠️ 实体处理异常: {str(e_entity)[:120]}")
+                except Exception as e_space:
+                    log(f"  ⚠️ 遍历 {space_name} 异常: {str(e_space)[:120]}")
+
+            # 强制重绘/刷新
+            try:
+                doc.Regen(0)  # 0 对应 acActiveViewport
+                time.sleep(0.15)
+            except Exception:
+                pass
+
+            if changed > 0:
+                try:
+                    doc.Save()
+                    log(f"  ✅ 保存成功，共替换 {changed} 项。")
+                except Exception as e_save:
+                    log(f"  ❌ 保存失败: {str(e_save)[:120]}")
+                    # 保存失败尝试重试
+                    try:
+                        doc.Close(False)
+                    except Exception:
+                        pass
+                    if attempt < max_retries:
+                        time.sleep(0.5)
+                        continue
+            else:
+                log("  ⚠️ 未找到匹配项。")
+
+            try:
+                doc.Close(False)
+            except Exception:
+                pass
+
+            gc.collect()
+            time.sleep(0.1)
+            break  # 成功或无匹配，跳出重试循环
+
+        except Exception as e:
+            log(f"❌ 错误处理文件 {dwg_path}: {str(e)[:300]}")
+            # 尝试关闭并重试
+            try:
+                if doc:
+                    doc.Close(False)
+            except Exception:
+                pass
+            gc.collect()
+            if attempt < max_retries:
+                wait = 0.6 + attempt * 0.5
+                log(f"   ⏳ 等待 {wait:.1f}s 后重试...")
+                time.sleep(wait)
+                continue
+            else:
+                log("   ❌ 达到最大重试次数，跳过此文件。")
+                break
 
 
-def replace_cad_text(folder, old_texts, new_texts, include_subfolders=False):
+def replace_cad_text(folder, old_texts, new_texts, include_subfolders=False, use_dispatchex=True):
     if include_subfolders:
         dwg_files = [os.path.join(root, f) for root, _, files in os.walk(folder)
-                     for f in files if f.lower().endswith(".dwg") and not f.startswith("~$")]
+                     for f in files if f.lower().endswith(".dwg") and not f.startswith('~$')]
     else:
         dwg_files = [os.path.join(folder, f) for f in os.listdir(folder)
-                     if f.lower().endswith(".dwg") and not f.startswith("~$")]
+                     if f.lower().endswith(".dwg") and not f.startswith('~$')]
 
     if not dwg_files:
         log("⚠️ 未找到 DWG 文件")
@@ -195,19 +310,28 @@ def replace_cad_text(folder, old_texts, new_texts, include_subfolders=False):
 
     try:
         log("🚀 启动 AutoCAD 中...")
-        acad = win32com.client.Dispatch("AutoCAD.Application")
+        # 优先尝试 DispatchEx（创建独立 COM 实例），失败则回退 Dispatch
+        if use_dispatchex:
+            try:
+                acad = win32com.client.DispatchEx("AutoCAD.Application")
+            except Exception:
+                acad = win32com.client.Dispatch("AutoCAD.Application")
+        else:
+            acad = win32com.client.Dispatch("AutoCAD.Application")
+
         acad.Visible = False
-        time.sleep(2)
+        # 给 AutoCAD 一点时间启动
+        time.sleep(1.2)
 
         for dwg_path in dwg_files:
-            replace_text_in_dwg(dwg_path, old_texts, new_texts, acad)
+            replace_text_in_dwg(dwg_path, old_texts, new_texts, acad, max_retries=3)
 
         log(f"\n✅ 所有 DWG 文件处理完成，共处理 {len(dwg_files)} 个文件。")
     except Exception as e:
         log(f"❌ AutoCAD 启动失败: {str(e)}")
 
 
-# ----------------- 启动替换线程 -----------------
+# ----------------- 启动替换线程（方案 A：线程入口初始化 COM） -----------------
 def start_replacement():
     folder = folder_entry.get()
     old_texts = [e.get() for e in old_entries]
@@ -224,10 +348,19 @@ def start_replacement():
         return
 
     def task():
-        if excel_var.get():
-            replace_excel_text(folder, old_texts, new_texts, include_subfolders)
-        if cad_var.get():
-            replace_cad_text(folder, old_texts, new_texts, include_subfolders)
+        # 在此线程上初始化 COM（必要）
+        pythoncom.CoInitialize()
+        try:
+            if excel_var.get():
+                replace_excel_text(folder, old_texts, new_texts, include_subfolders)
+            if cad_var.get():
+                replace_cad_text(folder, old_texts, new_texts, include_subfolders, use_dispatchex=True)
+        finally:
+            # 确保反初始化 COM，释放线程绑定资源
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
     threading.Thread(target=task, daemon=True).start()
 
