@@ -1,0 +1,242 @@
+import os
+import tkinter as tk
+from tkinter import filedialog, ttk, messagebox
+import threading
+import win32com.client
+import pythoncom
+import pandas as pd
+from openpyxl.utils import get_column_letter
+import time
+
+class AutoCADSearchApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("AutoCAD & Excel 深度搜索工具 v2.5")
+        self.root.geometry("1000x700")
+        self.root.configure(bg="#f5f5f5")
+
+        # --- 核心变量 ---
+        self.dir_path = tk.StringVar()
+        self.search_str = tk.StringVar()
+        self.check_excel = tk.BooleanVar(value=True)
+        self.check_cad = tk.BooleanVar(value=False)      # 默认不勾选 CAD
+        self.check_subfolders = tk.BooleanVar(value=True) # 默认勾选子文件夹
+        self.status_msg = tk.StringVar(value="准备就绪 (搜索CAD需确保电脑已安装 AutoCAD)")
+
+        # --- 控制变量 ---
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set() 
+        self.is_searching = False
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        # 整体内边距
+        main_frame = tk.Frame(self.root, bg="#f5f5f5", padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 1. 顶部区域：目录选择
+        path_frame = tk.LabelFrame(main_frame, text=" 1. 选择目录 ", bg="#f5f5f5", padx=10, pady=10)
+        path_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Entry(path_frame, textvariable=self.dir_path, width=80, font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=(0, 10), ipady=3)
+        tk.Button(path_frame, text=" 浏览文件夹... ", command=self.select_dir, bg="#e1e1e1", relief=tk.GROOVE).pack(side=tk.LEFT)
+
+        # 2. 中部区域：配置选项
+        opt_frame = tk.LabelFrame(main_frame, text=" 2. 搜索配置 ", bg="#f5f5f5", padx=10, pady=10)
+        opt_frame.pack(fill=tk.X, pady=10)
+        
+        tk.Checkbutton(opt_frame, text="搜索 Excel (.xlsx/.xls)", variable=self.check_excel, bg="#f5f5f5").pack(side=tk.LEFT, padx=20)
+        tk.Checkbutton(opt_frame, text="搜索 CAD (.dwg/.dxf)", variable=self.check_cad, bg="#f5f5f5").pack(side=tk.LEFT, padx=20)
+        tk.Checkbutton(opt_frame, text="包含子文件夹", variable=self.check_subfolders, bg="#f5f5f5").pack(side=tk.LEFT, padx=20)
+
+        # 3. 控制区域：关键词与按钮
+        ctrl_frame = tk.LabelFrame(main_frame, text=" 3. 执行搜索 ", bg="#f5f5f5", padx=10, pady=10)
+        ctrl_frame.pack(fill=tk.X, pady=10)
+        
+        tk.Label(ctrl_frame, text="搜索关键词:", bg="#f5f5f5").pack(side=tk.LEFT, padx=(0, 5))
+        tk.Entry(ctrl_frame, textvariable=self.search_str, width=30, font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=10, ipady=2)
+        
+        self.btn_search = tk.Button(ctrl_frame, text=" ▶ 开始搜索 ", command=self.start_search, bg="#d4edda", fg="#155724", width=12, font=("微软雅黑", 9, "bold"))
+        self.btn_search.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_pause = tk.Button(ctrl_frame, text=" ⏸ 暂停 ", command=self.toggle_pause, state=tk.DISABLED, width=10)
+        self.btn_pause.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_stop = tk.Button(ctrl_frame, text=" ⏹ 停止 ", command=self.stop_search, state=tk.DISABLED, bg="#f8d7da", fg="#721c24", width=10)
+        self.btn_stop.pack(side=tk.LEFT, padx=5)
+
+        # 4. 结果列表区域
+        list_frame = tk.Frame(main_frame, bg="#f5f5f5")
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        columns = ("file", "type", "info", "path")
+        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings")
+        self.tree.heading("file", text="文件名")
+        self.tree.heading("type", text="类型")
+        self.tree.heading("info", text="匹配位置详情")
+        self.tree.heading("path", text="完整路径")
+        
+        self.tree.column("file", width=150)
+        self.tree.column("type", width=80, anchor="center")
+        self.tree.column("info", width=350)
+        self.tree.column("path", width=300)
+        
+        sy = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        sx = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscroll=sy.set, xscroll=sx.set)
+        
+        sy.pack(side=tk.RIGHT, fill=tk.Y)
+        sx.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tree.bind("<Double-1>", self.on_double_click)
+
+        # 5. 底部状态栏与进度条
+        status_frame = tk.Frame(self.root, bg="#eeeeee", padx=10, pady=5)
+        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        self.progress = ttk.Progressbar(status_frame, orient=tk.HORIZONTAL, mode='determinate')
+        self.progress.pack(fill=tk.X, pady=(0, 5))
+        
+        tk.Label(status_frame, textvariable=self.status_msg, bg="#eeeeee", font=("微软雅黑", 9)).pack(side=tk.LEFT)
+
+    def select_dir(self):
+        p = filedialog.askdirectory()
+        if p: self.dir_path.set(p)
+
+    def toggle_pause(self):
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.btn_pause.config(text=" ▶ 继续 ")
+            self.status_msg.set("搜索已暂停...")
+        else:
+            self.pause_event.set()
+            self.btn_pause.config(text=" ⏸ 暂停 ")
+
+    def stop_search(self):
+        if self.is_searching:
+            if messagebox.askyesno("确认", "确定要停止当前的搜索任务吗？"):
+                self.stop_event.set()
+                self.pause_event.set()
+
+    def start_search(self):
+        if not self.dir_path.get() or not self.search_str.get():
+            messagebox.showwarning("提示", "请先选择目录并输入搜索关键词")
+            return
+        
+        for i in self.tree.get_children(): self.tree.delete(i)
+        self.progress['value'] = 0
+        self.btn_search.config(state=tk.DISABLED)
+        self.btn_pause.config(state=tk.NORMAL, text=" ⏸ 暂停 ")
+        self.btn_stop.config(state=tk.NORMAL)
+        self.stop_event.clear()
+        self.pause_event.set()
+        self.is_searching = True
+        
+        threading.Thread(target=self.run_task, daemon=True).start()
+
+    def run_task(self):
+        pythoncom.CoInitialize()
+        tdir = self.dir_path.get()
+        kw = self.search_str.get().lower()
+        
+        acad = None
+        if self.check_cad.get():
+            self.status_msg.set("正在唤醒 AutoCAD 引擎...")
+            try:
+                try:
+                    acad = win32com.client.GetActiveObject("AutoCAD.Application")
+                except:
+                    acad = win32com.client.Dispatch("AutoCAD.Application")
+                acad.Visible = False
+            except Exception as e:
+                self.status_msg.set(f"AutoCAD 启动失败: {e}")
+
+        # 收集文件
+        files = []
+        for r, ds, fs in os.walk(tdir):
+            if not self.check_subfolders.get() and r != tdir: continue
+            for f in fs:
+                ext = os.path.splitext(f)[1].lower()
+                fp = os.path.normpath(os.path.join(r, f))
+                if self.check_excel.get() and ext in ['.xlsx', '.xls']: files.append((fp, 'EXCEL'))
+                if self.check_cad.get() and ext in ['.dwg', '.dxf']: files.append((fp, 'CAD'))
+
+        total = len(files)
+        if total == 0:
+            self.finish("未找到指定类型的文件"); return
+
+        found = 0
+        for i, (fp, ft) in enumerate(files):
+            if self.stop_event.is_set(): break
+            while not self.pause_event.is_set(): 
+                time.sleep(0.2)
+                if self.stop_event.is_set(): break
+
+            self.status_msg.set(f"扫描中 ({i+1}/{total}): {os.path.basename(fp)}")
+            self.progress['value'] = ((i+1)/total)*100
+            
+            detail = None
+            try:
+                if ft == 'EXCEL': detail = self.search_excel(fp, kw)
+                elif ft == 'CAD' and acad: detail = self.search_cad(acad, fp, kw)
+                
+                if detail:
+                    found += 1
+                    self.tree.insert("", tk.END, values=(os.path.basename(fp), ft, detail, fp))
+            except: pass
+
+        self.finish(f"搜索结束，共找到 {found} 个文件。")
+
+    def search_excel(self, fp, kw):
+        try:
+            dfs = pd.read_excel(fp, sheet_name=None, header=None)
+            res = []
+            for sn, df in dfs.items():
+                mask = df.astype(str).apply(lambda x: x.str.contains(kw, case=False, na=False))
+                if mask.any().any():
+                    idx = df.stack()[mask.stack()].index[0]
+                    res.append(f"{sn}!{get_column_letter(idx[1]+1)}{idx[0]+1}")
+                    if len(res) >= 2: break
+            return ", ".join(res) if res else None
+        except: return None
+
+    def search_cad(self, acad, fp, kw):
+        try:
+            doc = acad.Documents.Open(fp)
+            cnt = 0
+            # 搜模型空间
+            for obj in doc.ModelSpace:
+                if obj.ObjectName in ("AcDbText", "AcDbMText"):
+                    if kw in obj.TextString.lower(): cnt += 1
+                elif obj.ObjectName == "AcDbBlockReference" and obj.HasAttributes:
+                    for attr in obj.GetAttributes():
+                        if kw in attr.TextString.lower(): cnt += 1
+            # 搜块定义
+            for blk in doc.Blocks:
+                if blk.Name.startswith("*"): continue # 略过系统匿名块
+                for bobj in blk:
+                    if bobj.ObjectName in ("AcDbText", "AcDbMText"):
+                        if kw in bobj.TextString.lower(): cnt += 1
+            doc.Close(False)
+            return f"匹配 {cnt} 处文字/属性" if cnt > 0 else None
+        except: return None
+
+    def finish(self, msg):
+        self.status_msg.set(msg)
+        self.is_searching = False
+        self.btn_search.config(state=tk.NORMAL)
+        self.btn_pause.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.DISABLED)
+
+    def on_double_click(self, event):
+        sel = self.tree.selection()
+        if sel:
+            try: os.startfile(self.tree.item(sel[0], "values")[3])
+            except: pass
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AutoCADSearchApp(root)
+    root.mainloop()
